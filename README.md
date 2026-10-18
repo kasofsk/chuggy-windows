@@ -97,6 +97,8 @@ A project's configuration names the image its jobs run in, by digest or by tag. 
 
 An image that lacks one is refused before any agent starts, and the ticket stops with a reason naming what is missing.
 
+A private image is pulled with this machine's own login for its registry. Log in once, as the account the scheduled task runs as: `docker login ghcr.io`. The registry the pool was registered for is the exception: a pull from it presents the pool's own token.
+
 A task that pins no image names capabilities instead, and this runner meets them with what you give it in `runner.json`. With `images`, such a job runs in the first image listed declaring every capability it names, its platform aside, and is otherwise refused:
 
 ```json
