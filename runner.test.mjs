@@ -585,7 +585,7 @@ test("a run's backend refuses an assignment asking for more CPU than Docker Desk
   );
 });
 
-test("a pull is made at the endpoint Docker Desktop's context names, presenting the pool's token only to the registry its file names and docker's own empty credential to any other", async (t) => {
+test("a pull of the pool's registry is made at the endpoint Docker Desktop's context names under the pool's token alone, and any other image is docker's own pull with this machine's logins", async (t) => {
   const { runner, state } = await composed(
     t,
     { pool: { ...fixturePool, registryHost: "registry.chuggy.example" } },
@@ -602,29 +602,24 @@ test("a pull is made at the endpoint Docker Desktop's context names, presenting 
     );
   await runner.backend.settled();
   const pulls = state.calls.filter((call) => call.argv[0] === "pull");
-  assert.deepEqual(
-    pulls.map((pull) => [pull.argv.at(-1), pull.environment.DOCKER_HOST]),
-    [
-      [registryImage, desktopPipe],
-      [elsewhere, desktopPipe],
-    ],
-  );
-  assert.deepEqual(JSON.parse(pulls[0].authFile ?? ""), {
+  const pool = pulls.find((pull) => pull.argv.at(-1) === registryImage);
+  const own = pulls.find((pull) => pull.argv.at(-1) === elsewhere);
+  assert.equal(pulls.length, 2);
+  assert.equal(pool?.environment.DOCKER_HOST, desktopPipe);
+  assert.deepEqual(JSON.parse(pool?.authFile ?? ""), {
     auths: {
       "registry.chuggy.example": {
         auth: Buffer.from("chuggy-pool:pool-token").toString("base64"),
       },
     },
   });
-  assert.deepEqual(JSON.parse(pulls[1].authFile ?? ""), {
-    auths: {},
-    credHelpers: { "chuggy.invalid": "" },
-  });
-  for (const pull of pulls)
-    assert.ok(
-      pull.authDirectory?.startsWith(`${runner.runtime}/pull-`),
-      pull.authDirectory,
-    );
+  assert.ok(
+    pool?.authDirectory?.startsWith(`${runner.runtime}/pull-`),
+    pool?.authDirectory,
+  );
+  assert.deepEqual(own?.argv, ["pull", "--quiet", elsewhere]);
+  assert.deepEqual(own?.environment, {});
+  assert.equal(own?.authFile, undefined);
 });
 
 test("with engineSocket a job, and never a session, is handed Docker Desktop's socket read-only and added to root's group", async (t) => {

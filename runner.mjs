@@ -156,8 +156,9 @@ const remappedDocker = { rootless: "rootless", userns: "with userns-remap" };
 /**
  * Refuses rootless docker and userns-remap, because each maps a job's uid onto
  * one that cannot read the Claude token file, and any context but a local
- * named pipe, which Docker Desktop's is, since a remote context's
- * certificates would not reach the pull.
+ * named pipe, which Docker Desktop's is: a job mounts this machine's paths,
+ * which a remote daemon would find on its own, and a pull of the pool's
+ * registry is told the endpoint alone, without a context's certificates.
  *
  * @param {Engine} engine
  * @returns {Promise<string>} the endpoint docker's context names
