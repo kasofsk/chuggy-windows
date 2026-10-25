@@ -4,6 +4,11 @@
  * until the plane denies the pool. Where the pool was registered with
  * `--host`, a job that pins no image runs on this machine itself, beside the
  * containers. Every command starts here.
+ *
+ * EVERY BACKEND IS TOLD THE KIND OF CLAUDE CREDENTIAL, a subscription's. The
+ * core withholds what would choose another credential only from a workload
+ * told one, so a run that told none would let a variable its jobs inherit
+ * outrank the token.
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -41,7 +46,14 @@ import { poolIdentityDigest } from "@chuggy/worker-core/poolIdentity.mjs";
 import { runtimeScratch } from "@chuggy/worker-core/runtimeScratch.mjs";
 
 import {
+  diskFloorBytes,
+  diskFreeLogged,
+  diskFreePorts,
+  engineDiskFree,
+} from "./diskFree.mjs";
+import {
   claudeTokenFileRefusal,
+  runnerClaudeCredential,
   runnerConfig,
   runnerPaths,
 } from "./runnerConfig.mjs";
@@ -67,6 +79,7 @@ import { deniedExitStatus } from "./serviceTask.mjs";
  * @typedef {object} Runner
  * @property {string} runtime the pool's runtime directory
  * @property {Engine} engine
+ * @property {import("./diskFree.mjs").DiskFreePorts} disk what the free disk is measured by
  * @property {ContainerBackend} backend
  * @property {WorkerPoolClient} client
  */
@@ -217,7 +230,7 @@ export async function engineMachine(engine) {
 
 /**
  * @param {RunnerSetup} setup
- * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal, engine?: Engine, tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, places?: boolean}} host where its log lines go, who besides this account may open a file, the engine and token source when not those the files name, the fetch a job's or a session's plane is reached by when not the global one, and `places: false` for a run that places nothing, which then composes no host backend: a job on this machine itself is stopped only through the service
+ * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal, engine?: Engine, tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, places?: boolean, disk?: import("./diskFree.mjs").DiskFreePorts, spawn?: typeof spawn}} host where its log lines go, who besides this account may open a file, the engine and token source when not those the files name, the fetch a job's or a session's plane is reached by when not the global one, `places: false` for a run that places nothing, which then composes no host backend: a job on this machine itself is stopped only through the service, what the free disk is measured by when not this machine's own, and what starts a job on this machine itself when not `hostJobSpawned`
  * @returns {Promise<Runner>}
  */
 export async function runnerParts(setup, host) {
@@ -229,11 +242,13 @@ export async function runnerParts(setup, host) {
   const engineSocket =
     host.places === false ? undefined : engineSocketHanded(setup.config);
   const tokens = host.tokens ?? poolRunnerTokens(credentials);
+  const disk = host.disk ?? diskFreePorts;
   const container = containerBackend(
     {
       engine: config.engine,
       pool: credentials,
       tokenFile: config.claudeTokenFile,
+      claudeCredential: runnerClaudeCredential,
       registryHost: credentials.registryHost,
       dockerHost,
       timeoutSecsMax: config.timeoutSecsMax,
@@ -246,6 +261,9 @@ export async function runnerParts(setup, host) {
       pullRetryMs,
       images: config.images,
       ...(engineSocket === undefined ? {} : { engineSocket }),
+      imageRecord: win32.join(paths.images, `${config.engine}.json`),
+      imageUnusedSecsMax: config.imageUnusedSecsMax,
+      diskFreeBytesMin: diskFloorBytes(config),
     },
     {
       engine,
@@ -255,6 +273,10 @@ export async function runnerParts(setup, host) {
       log: host.log,
       tokenFileRefusal: (file) =>
         claudeTokenFileRefusal(file, host.sharedRefusal),
+      diskFree: diskFreeLogged(
+        () => engineDiskFree(config, paths, engine, disk),
+        host.log,
+      ),
     },
   );
   const backend =
@@ -267,7 +289,7 @@ export async function runnerParts(setup, host) {
     { concurrencyMax: config.concurrencyMax, sessionsMax: config.sessionsMax },
     { tokens, fetch: host.fetch },
   );
-  return { runtime: runtimeDir, engine, backend, client };
+  return { runtime: runtimeDir, engine, disk, backend, client };
 }
 
 /**
@@ -378,7 +400,7 @@ export function hostJobTreeKilled(pid) {
  *
  * @param {RunnerSetup} setup
  * @param {ContainerBackend} container
- * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal}} host
+ * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal, spawn?: typeof spawn}} host
  * @returns {ContainerBackend}
  */
 function runnerHostRouted(setup, container, host) {
@@ -393,6 +415,7 @@ function runnerHostRouted(setup, container, host) {
         directory: win32.join(paths.jobs, poolIdentityDigest(credentials)),
         logDir: paths.logs,
         tokenFile: config.claudeTokenFile,
+        claudeCredential: runnerClaudeCredential,
         timeoutSecsMax: config.timeoutSecsMax,
         outputBytesMax: config.outputBytesMax,
         environment: config.environment,
@@ -406,7 +429,7 @@ function runnerHostRouted(setup, container, host) {
         log: host.log,
         tokenFileRefusal: (file) =>
           claudeTokenFileRefusal(file, host.sharedRefusal),
-        spawn: hostJobSpawned,
+        spawn: host.spawn ?? hostJobSpawned,
         kill: (pid) => hostJobTreeKilled(pid),
         atExit: (onExit) => process.once("exit", onExit),
       },

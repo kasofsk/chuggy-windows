@@ -20,6 +20,7 @@ import {
 } from "@chuggy/worker-core/poolRunner.mjs";
 
 import { controlServer } from "@chuggy/worker-core/control.mjs";
+import { diskFloorSaid, diskFreePorts } from "./diskFree.mjs";
 import { doctorFindings, findingLine } from "./doctor.mjs";
 import {
   poolHeldCode,
@@ -83,6 +84,7 @@ import {
  * @property {import("@chuggy/worker-core/engine.mjs").Engine} [engine] the engine a run and doctor reach, when not the one the runner's file names
  * @property {import("@chuggy/worker-core/poolLoop.mjs").WorkerPoolClient["tokens"]} [tokens] the token source a run and doctor reach, when not the pool's issuer
  * @property {import("@chuggy/worker-core/poolLoop.mjs").WorkerPoolClient["plane"]} [plane] the plane doctor polls, when not the pool's
+ * @property {import("./diskFree.mjs").DiskFreePorts} [disk] what a run, doctor and status measure the free disk by, when not this machine's own
  * @property {import("./taskScheduler.mjs").TaskScheduler} tasks how `schtasks` is run
  * @property {import("./runnerConfig.mjs").SharedRefusal} sharedRefusal who besides this account may open a file
  * @property {() => Promise<string>} userSid this account's SID
@@ -153,6 +155,7 @@ async function started(call, run = { places: true }) {
     tokens: call.host.tokens,
     fetch: call.host.fetch,
     places: run.places,
+    disk: call.host.disk,
   });
   const holder = await poolServiceFound(runner.runtime, call.host.locking);
   return { setup, runner, holder, pipe: holder?.pipe };
@@ -321,6 +324,13 @@ async function status(call) {
           : "service: running",
   );
   call.host.out(`limits: ${runnerConfigLimits(setup.config)}`);
+  const disk = await diskFloorSaid(
+    setup.config,
+    setup.paths,
+    runner.engine,
+    runner.disk,
+  );
+  call.host.out(`disk floor: ${disk.detail}`);
   for (const placement of answered?.inFlight ?? [])
     call.host.out(
       `${placement.name}  ${statusKind(placement)}  ${placement.phase.toLowerCase()}  ${placement.image}  ${placement.assignment}`,
@@ -376,6 +386,7 @@ function doctorFound(host, poolFile) {
     tasks: host.tasks,
     node: host.node,
     cli: host.cli,
+    disk: host.disk ?? diskFreePorts,
     parts: {
       engine: (config) => host.engine ?? runnerEngine(config),
       tokens: (credentials) => host.tokens ?? poolRunnerTokens(credentials),

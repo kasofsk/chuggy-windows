@@ -58,7 +58,9 @@ It takes no `--pool`, and the file is named for the tenant and the member. A mem
   "timeoutSecsMax": 7200,
   "outputBytesMax": 1048576,
   "environment": {},
-  "network": "chuggy-jobs"
+  "network": "chuggy-jobs",
+  "imageUnusedSecsMax": 604800,
+  "diskFreeGibMin": 20
 }
 ```
 
@@ -74,6 +76,9 @@ It takes no `--pool`, and the file is named for the tenant and the member. A mem
 | `network`         | no       | The bridge network jobs join, made if missing. Default `chuggy-jobs`; never `host`.                          |
 | `engineSocket`    | no       | `true` hands each job Docker Desktop's engine, below. Default `false`.                                       |
 | `images`          | no       | The images a job that pins none runs in, below. Default none.                                                |
+| `imageUnusedSecsMax` | no    | How long a job's image this runner pulled may go unused before it is removed; 0 keeps them until the disk is under `diskFreeGibMin`. Default a week, 604800. |
+| `diskFreeGibMin`  | no       | The GiB kept free for what Docker Desktop holds, below; 0 keeps no floor; 0.3.0 or later. Default 20.         |
+| `dockerDiskDirectory` | no   | The directory holding Docker Desktop's disk image, `docker_data.vhdx`, where its settings moved it. Default `%LOCALAPPDATA%\Docker\wsl\disk`. |
 
 Save the token file under `%APPDATA%`, where only you may open it. Docker Desktop shows a file it mounts to every user in the container, so a job reads it as the image's user.
 
@@ -86,6 +91,10 @@ A session is a project's chat or lead, run on this machine's Claude login, and c
 With `engineSocket` on, each job, and never a session, is handed Docker Desktop's engine, so that its checks can build images and start containers of their own, as testcontainers does. The socket in Docker Desktop's VM is mounted at `/var/run/docker.sock`, read-only, which limits nothing the engine will do; it is root's group's, so each job is added to root's group, and is told where the socket is by `DOCKER_HOST` and `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`, which `environment` may then not name.
 
 Every job on this machine, and its agent, can then run anything Docker Desktop will. That is root on its VM, every other job and session here among it, and whatever Docker Desktop shares of this machine, which by default is your user folder: a job can mount it and read or change your files, your keys, and this runner's own pool files and tokens. Turn it on only on a machine whose every project you trust that far; `doctor` warns of it whenever it is on. The containers a job starts are left to testcontainers' own clean-up (Ryuk), so a killed job can leave them running.
+
+**The disk floor** is `diskFreeGibMin`, held each pass against the lower of two: what is free on the drive holding Docker Desktop's disk image, which grows into that drive, and what is free in Docker Desktop's VM under `/mnt/docker-desktop-disk`, which Docker Desktop's disk size caps. The VM's is asked through `wsl -d docker-desktop`. Where only one can be measured, the floor is held on that one, and the service's log, `doctor` and `status` say so; where neither can, or the engine is not Docker Desktop's, no floor is held. Under it, the service removes the images it may, at most once a minute and under half of it every pass, as the hourly removal below does but keeping only the newest of chuggy's runtime and session images, and removing a job's image this runner pulled whatever `imageUnusedSecsMax` says, and takes no job until the disk is over it; sessions and jobs already running go on. Under half of it once that removal has begun, and is done or has run out its 30 s, it kills one job a pass, never a session: the one whose container and workspace hold the most, and otherwise the newest. chuggy shows that job's ticket as Disk low, waiting for you to free space on this machine and resume it. The service's log says when the disk goes under the floor and when it is over again. `doctor` and `status` say what is free against the floor.
+
+What is removed in the VM frees room in the disk image, and Docker Desktop returns it to the drive only where the image is sparse. Where the drive stays under the floor once images are gone, compact the image: stop the runner's tasks, `wsl --shutdown`, then `Optimize-VHD -Path <the image> -Mode Full` (Hyper-V's PowerShell) or diskpart's `compact vdisk`.
 
 ## The image a job runs in
 
@@ -149,7 +158,7 @@ and to start it again, `/ENABLE` then `/Run`. Ending the task ends the service, 
 | `run`               | The runner: polls until the plane denies the pool.                                                                      |
 | `service`           | What the task runs: `run`, started again after it ends unless the plane denied the pool.                                 |
 | `once`              | One poll, then waits for what it placed to start, and for a job on this machine itself to end. Holds the pool as `run` does, so each is refused while the other runs. |
-| `status`            | The runner's limits, this pool's containers, the service's jobs on this machine itself and what it is still pulling or starting, each named a job or a session. |
+| `status`            | The runner's limits, the free disk against its floor, this pool's containers, the service's jobs on this machine itself and what it is still pulling or starting, each named a job or a session. |
 | `stop <assignment>` | Stops one assignment's container, through the service when it is running; a job on this machine itself only through the service. |
 | `doctor`            | The checks above.                                                                                                       |
 | `install-service`   | Registers the pool's scheduled task.                                                                                    |
@@ -162,7 +171,8 @@ and to start it again, `/ENABLE` then `/Run`. Ending the task ends the service, 
 - Pulls a missing image from the registry the pool was registered for under the pool's own token, written for that one pull to a directory only you can open and removed after it. An image from any other registry is pulled once with no credential, and never with a login Docker Desktop keeps.
 - Runs each job as uid 1000 through chuggy's runtime, mounted read-only, with every capability dropped, no privilege escalation, a process limit, the assignment's CPU and memory, the token file mounted read-only, and a workspace volume of its own. The job's credentials reach it through an env file that is deleted once the container starts.
 - Keeps renewing an assignment while its image is still pulling, and finds the containers a previous run started.
-- Saves an ended job's logs to `%LOCALAPPDATA%\chuggy-windows\logs\<container>.log` and removes the container with its workspace. A job that is stopped, or past its deadline, is killed first.
+- Saves an ended job's logs to `%LOCALAPPDATA%\chuggy-windows\logs\<container>.log` and removes the container with its workspace. A job that is stopped, or past its deadline, is killed first. A log longer than 10 MiB or than 200 000 lines is saved as its end, opening with a line saying so. A container whose logs cannot be saved is kept and tried again, and after ten minutes removed without them, which the service's log says.
+- Removes images this machine no longer needs, hourly: of each repository chuggy's runtime or sessions came from, every untagged image but the two most recently used, and a job's image this runner pulled itself once it has gone unused for `imageUnusedSecsMax`; under the [disk floor](#configure), more. No removal is forced, so an image a container uses stays. Nor is an image removed while a placement is about to use it, within ten minutes of its last use, or while it has a tag but the one a job pulled it by; to keep an image, tag it. Every runner here keeps one record of what it used, in `%LOCALAPPDATA%\chuggy-windows\images\docker.json`. A job's image pulled before the runner kept that record was never recorded as its own, and stays until you remove it.
 - Tells chuggy at once when a job ends without being stopped, with the runner's own reason and never the job's log, and when a session's container ends.
 
 ## What it does not do

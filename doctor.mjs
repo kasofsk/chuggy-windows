@@ -28,6 +28,7 @@ import {
   poolIdentityPersonal,
   poolLabelValue,
 } from "@chuggy/worker-core/poolIdentity.mjs";
+import { diskFloorSaid } from "./diskFree.mjs";
 import {
   claudeTokenFileRefusal,
   runnerConfig,
@@ -73,6 +74,7 @@ import {
  * @property {import("./taskScheduler.mjs").TaskScheduler} tasks how `schtasks` is run
  * @property {string} node the Node binary running this
  * @property {string} cli this CLI's entry, as an absolute path
+ * @property {import("./diskFree.mjs").DiskFreePorts} disk what the free disk is measured by
  * @property {DoctorParts} parts
  */
 
@@ -164,12 +166,35 @@ function failureMessage(failure) {
 }
 
 /**
+ * The free disk against the floor the runner's file sets, warned of where
+ * any place could not be measured or it is under the floor.
+ *
+ * @param {Engine} engine
+ * @param {RunnerConfig} config
+ * @param {DoctorInput} input
+ * @returns {Promise<DoctorFinding>}
+ */
+async function diskFloorFinding(engine, config, input) {
+  const check = "disk floor";
+  const { detail, warning } = await diskFloorSaid(
+    config,
+    input.paths,
+    engine,
+    input.disk,
+  );
+  return warning
+    ? { check, passed: true, warning: true, detail }
+    : { check, passed: true, detail };
+}
+
+/**
  * @param {Engine} engine
  * @param {PoolCredentials} credentials
  * @param {RunnerConfig} config
+ * @param {DoctorInput} input
  * @param {DoctorFinding[]} findings
  */
-async function engineChecks(engine, credentials, config, findings) {
+async function engineChecks(engine, credentials, config, input, findings) {
   const reachable = await checked(findings, "container engine", async () => {
     const endpoint = await engineEndpoint(engine);
     const machine = await engineMachine(engine);
@@ -190,6 +215,7 @@ async function engineChecks(engine, credentials, config, findings) {
       return [true, `${config.network} is missing, and a run makes it`];
     throw new Error(engineFailureLine(inspected));
   });
+  findings.push(await diskFloorFinding(engine, config, input));
 }
 
 /**
@@ -353,6 +379,7 @@ export async function doctorFindings(input) {
       input.parts.engine(config),
       credentials,
       config,
+      input,
       findings,
     );
   await planeChecks(input, credentials, findings);

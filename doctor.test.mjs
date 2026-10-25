@@ -6,7 +6,7 @@ import test from "node:test";
 import { hostTimeoutSecsMax } from "@chuggy/worker-core/hostBackend.mjs";
 
 import { doctorFindings, findingLine } from "./doctor.mjs";
-import { fakeEngine } from "./engine.fixture.mjs";
+import { fakeDisk, fakeEngine } from "./engine.fixture.mjs";
 import {
   fixtureUserSid,
   poolFileWritten,
@@ -34,6 +34,7 @@ const taskName = "\\chuggy-windows\\pool";
  * @property {unknown} [token] what the issuer answers
  * @property {unknown} [polled] what the plane answers
  * @property {(engine: import("./engine.fixture.mjs").FakeEngineState) => void} [engine] what the engine answers
+ * @property {import("./diskFree.mjs").DiskFreePorts} [disk] what the free disk is measured by, 100 GiB free everywhere where none
  * @property {(poolFile: string) => string} [task] the definition of the task of the pool file's name, where there is one
  * @property {readonly string[]} [alsoMade] other directories made, by path
  * @property {readonly ("pool" | "runtime" | "logs" | "jobs")[]} [made] which of the runner's directories are made: the pool file's, the runtime directory, the logs and the host jobs'
@@ -122,6 +123,7 @@ async function doctored(t, options = {}) {
     sharedRefusal: fixture.sharedRefusal,
     tasks: scheduler.scheduler,
     ...copy,
+    disk: options.disk ?? fakeDisk(100),
     parts: issuerAndPlane(options, engine, polls),
   });
   return {
@@ -141,6 +143,10 @@ async function doctored(t, options = {}) {
  */
 const finding = (findings, check) =>
   findings.find((found) => found.check === check);
+
+/** What the disk floor finds of a fake disk with 100 GiB free everywhere. */
+const diskOver =
+  "100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB";
 
 test("a machine ready to run passes every check, and doctor changes nothing", async (t) => {
   const { findings, state, polls, poolFile, paths, tokenFile, scheduler } =
@@ -183,6 +189,7 @@ test("a machine ready to run passes every check, and doctor changes nothing", as
       passed: true,
       detail: "chuggy-jobs is missing, and a run makes it",
     },
+    { check: "disk floor", passed: true, detail: diskOver },
     {
       check: "pool token",
       passed: true,
@@ -205,9 +212,43 @@ test("a machine ready to run passes every check, and doctor changes nothing", as
       ["info", "--format"],
       ["ps", "--all"],
       ["network", "inspect"],
+      ["info", "--format"],
     ],
   );
   assert.deepEqual(scheduler.argvs(), [serviceQueryArgv(taskName)]);
+});
+
+test("the disk floor is warned of where the free disk is under it, or where Docker Desktop's VM could not be measured, and passes still", async (t) => {
+  const under = await doctored(t, {
+    runner: { diskFreeGibMin: 30 },
+    disk: fakeDisk(80, 20),
+  });
+  assert.deepEqual(finding(under.findings, "disk floor"), {
+    check: "disk floor",
+    passed: true,
+    warning: true,
+    detail:
+      "20 GiB free at /mnt/docker-desktop-disk in Docker Desktop's VM, under the floor of 30 GiB: the service removes the images it may and takes no job until it is over",
+  });
+  const unmeasured = await doctored(t, {
+    disk: fakeDisk(50, "There is no distribution with the supplied name."),
+  });
+  assert.deepEqual(finding(unmeasured.findings, "disk floor"), {
+    check: "disk floor",
+    passed: true,
+    warning: true,
+    detail:
+      "50 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB; only that, since Docker Desktop's VM could not be measured at /mnt/docker-desktop-disk: There is no distribution with the supplied name.",
+  });
+  const off = await doctored(t, {
+    runner: { diskFreeGibMin: 0 },
+    disk: fakeDisk(1),
+  });
+  assert.deepEqual(finding(off.findings, "disk floor"), {
+    check: "disk floor",
+    passed: true,
+    detail: "none: the runner's file sets diskFreeGibMin to 0",
+  });
 });
 
 test("doctor names a personal runner's file as one, by its tenant and member", async (t) => {

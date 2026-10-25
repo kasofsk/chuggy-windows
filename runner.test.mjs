@@ -9,10 +9,12 @@ import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
+import { claudeCredentialVariable } from "@chuggy/worker-core/claudeCredential.mjs";
 import { workerPoolClientPass } from "@chuggy/worker-core/poolLoop.mjs";
 import { runtimeScratch } from "@chuggy/worker-core/runtimeScratch.mjs";
 
-import { fakeEngine } from "./engine.fixture.mjs";
+import { fakeDisk, fakeEngine } from "./engine.fixture.mjs";
 import {
   engineEndpoint,
   engineSocketHanded,
@@ -72,6 +74,7 @@ async function composed(t, documents, host = {}) {
     log: () => undefined,
     sharedRefusal: fixture.sharedRefusal,
     engine,
+    disk: fakeDisk(100),
     ...host,
   });
   return { ...fixture, setup, runner, engine, state };
@@ -622,19 +625,27 @@ test("a pull of the pool's registry is made at the endpoint Docker Desktop's con
   assert.equal(own?.authFile, undefined);
 });
 
-test("with engineSocket a job, and never a session, is handed Docker Desktop's socket read-only and added to root's group", async (t) => {
-  const { runner, state } = await composed(t, {
-    runner: { engineSocket: true },
-  });
-  state.images.add(registryImage);
-  await runner.backend.place(runnerAssignment("asg-1", registryImage), "Job");
-  await runner.backend.place(
-    runnerAssignment("asg-2", registryImage),
-    "Session",
-  );
-  await runner.backend.settled();
-  const runs = state.calls.filter((call) => call.argv[0] === "run");
+/**
+ * The engine's `run` of a job and then of a session, placed by a run whose
+ * runner's file adds `runner` to the fixture's.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {Record<string, unknown>} [runner]
+ */
+async function jobAndSessionRuns(t, runner = {}) {
+  const composition = await composed(t, { runner });
+  composition.state.images.add(registryImage);
+  const { backend } = composition.runner;
+  await backend.place(runnerAssignment("asg-1", registryImage), "Job");
+  await backend.place(runnerAssignment("asg-2", registryImage), "Session");
+  await backend.settled();
+  const runs = composition.state.calls.filter((call) => call.argv[0] === "run");
   assert.equal(runs.length, 2);
+  return runs;
+}
+
+test("with engineSocket a job, and never a session, is handed Docker Desktop's socket read-only and added to root's group", async (t) => {
+  const runs = await jobAndSessionRuns(t, { engineSocket: true });
   const [job, session] = runs.map((run) => run.argv);
   assert.ok(
     job.includes(
@@ -690,6 +701,163 @@ test("a job runs on the runner's network with its limits, the Claude token file 
     argv.join(" "),
   );
   assert.equal(win32.isAbsolute(tokenFile), true);
+});
+
+test("a job and a session are each told their Claude credential is a subscription's token", async (t) => {
+  for (const run of await jobAndSessionRuns(t))
+    assert.match(
+      run.envFile ?? "",
+      new RegExp(
+        `^${claudeCredentialVariable}=\\{"kind":"Subscription"\\}$`,
+        "mu",
+      ),
+    );
+});
+
+/**
+ * A fake engine that lists one image, `image` by its digest alone, and
+ * records each removal of it.
+ *
+ * @param {string} image
+ * @param {string[]} removed
+ * @returns {import("@chuggy/worker-core/engine.mjs").Engine}
+ */
+function imageRemovingEngine(image, removed) {
+  const { engine } = fakeEngine();
+  const answered = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+  return {
+    ...engine,
+    exec: async (argv, call) => {
+      const [verb, sub, ...rest] = argv;
+      if (verb !== "image" || (sub === "inspect" && rest[0] === "--format"))
+        return engine.exec(argv, call);
+      if (sub === "ls") return answered("sha256:1\n");
+      if (sub === "rm") {
+        removed.push(rest[0]);
+        return answered(`Untagged: ${rest[0]}\nDeleted: sha256:1\n`);
+      }
+      return answered(
+        JSON.stringify([
+          { Id: "sha256:1", RepoTags: [], RepoDigests: [image] },
+        ]),
+      );
+    },
+  };
+}
+
+test("a run records the images it uses in one record per engine under the local application data, and removes a job's image unused for as long as its file says", async (t) => {
+  const image = `ghcr.io/someone/tool@sha256:${"b".repeat(64)}`;
+  for (const [imageUnusedSecsMax, kept] of /** @type {const} */ ([
+    [undefined, true],
+    [86_399, false],
+  ])) {
+    const fixture = await runnerFixture(t, {
+      runner: imageUnusedSecsMax === undefined ? {} : { imageUnusedSecsMax },
+    });
+    const record = win32.join(fixture.paths.images, "docker.json");
+    assert.equal(
+      record,
+      "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\images\\docker.json",
+    );
+    await mkdir(win32.dirname(record), { recursive: true });
+    await writeFile(
+      record,
+      JSON.stringify({
+        version: 1,
+        createdMs: 0,
+        repositories: {},
+        images: {
+          [image]: {
+            kinds: ["Job"],
+            usedMs: Date.now() - 86_400_000,
+            pulledId: "sha256:1",
+          },
+        },
+        holds: {},
+      }),
+    );
+    /** @type {string[]} */
+    const removed = [];
+    const runner = await runnerParts(
+      await runnerSetup(
+        fixture.poolFile,
+        fixture.environment,
+        fixture.home,
+        fixture.sharedRefusal,
+      ),
+      {
+        log: () => undefined,
+        sharedRefusal: fixture.sharedRefusal,
+        disk: fakeDisk(100),
+        engine: imageRemovingEngine(image, removed),
+      },
+    );
+    await runner.backend.held();
+    await runner.backend.settled();
+    assert.deepEqual(removed, kept ? [] : [image], String(imageUnusedSecsMax));
+  }
+});
+
+test("a run holds the floor its file sets in GiB free, the lower of the drive and Docker Desktop's VM, taking no job under it, and keeps none at 0", async (t) => {
+  const drive = "C:\\, holding Docker Desktop's disk image";
+  const vm = "/mnt/docker-desktop-disk in Docker Desktop's VM";
+  for (const [
+    diskFreeGibMin,
+    driveGib,
+    vmGib,
+    taken,
+    where,
+  ] of /** @type {const} */ ([
+    [undefined, 19.9, 900, false, drive],
+    [undefined, 20, 900, true, drive],
+    [30, 900, 29.5, false, vm],
+    [0, 0.5, 0.5, true, drive],
+  ])) {
+    const label = `${String(diskFreeGibMin)} at ${String(driveGib)}/${String(vmGib)}`;
+    const disk = fakeDisk(driveGib, vmGib);
+    /** @type {string[]} */
+    const logged = [];
+    const { runner } = await composed(
+      t,
+      { runner: diskFreeGibMin === undefined ? {} : { diskFreeGibMin } },
+      { disk, log: (line) => logged.push(line) },
+    );
+    await runner.client.backend.held();
+    await runner.backend.settled();
+    assert.equal(runner.client.backend.jobsTaken?.(), taken, label);
+    if (diskFreeGibMin === 0)
+      assert.deepEqual([disk.measured, disk.wslCalls], [[], []], label);
+    else
+      assert.equal(
+        logged.includes(
+          `this runner's disk has ${String(where === drive ? driveGib : vmGib)} GiB free at ${where}, under its floor of ${String(diskFreeGibMin ?? 20)} GiB: it takes no job until it is over`,
+        ),
+        !taken,
+        `${label}: ${logged.join("; ")}`,
+      );
+  }
+});
+
+test("a run says in its log when Docker Desktop's VM cannot be measured, and holds the floor on the drive alone", async (t) => {
+  /** @type {string[]} */
+  const logged = [];
+  const { runner } = await composed(
+    t,
+    {},
+    {
+      disk: fakeDisk(10, "There is no distribution with the supplied name."),
+      log: (line) => logged.push(line),
+    },
+  );
+  await runner.client.backend.held();
+  await runner.backend.settled();
+  assert.equal(runner.client.backend.jobsTaken?.(), false);
+  assert.ok(
+    logged.includes(
+      "this runner measures its free disk only at C:\\, holding Docker Desktop's disk image, since Docker Desktop's VM could not be measured at /mnt/docker-desktop-disk: There is no distribution with the supplied name.",
+    ),
+    logged.join("; "),
+  );
 });
 
 /**
@@ -968,6 +1136,49 @@ test("a pool registered with --host places a job pinning no image and naming thi
     evidence: `the assignment asks for ${String(cpuMillis + 1)} CPU millis and this machine has ${String(cpuMillis)}`,
   });
   assert.equal(state.calls.length, calls);
+});
+
+test("a host job is told its Claude credential is a subscription's token, read where the runner's file names it", async (t) => {
+  exitWatched(t);
+  /** @type {Array<Record<string, string>>} */
+  const started = [];
+  /** @type {Promise<unknown>[]} */
+  const closed = [];
+  const { runner, tokenFile } = await composed(
+    t,
+    { pool: hostedPool },
+    {
+      spawn: /** @type {any} */ (
+        (
+          /** @type {string} */ _command,
+          /** @type {string[]} */ _argv,
+          /** @type {{env: Record<string, string>}} */ options,
+        ) => {
+          started.push(options.env);
+          const child = spawn(process.execPath, ["-e", ""], {
+            stdio: "ignore",
+          });
+          closed.push(once(child, "close"));
+          return child;
+        }
+      ),
+    },
+  );
+  const placed = await runner.backend.place(
+    imagelessJob("asg-1", "Platform:Windows:Amd64"),
+    "Job",
+  );
+  assert.deepEqual(placed, { placed: "Placed" });
+  await Promise.all(closed);
+  await runner.backend.settled();
+  assert.equal(started.length, 1);
+  assert.deepEqual(JSON.parse(started[0][claudeCredentialVariable]), {
+    kind: "Subscription",
+  });
+  assert.equal(
+    JSON.parse(started[0][workerTaskVariable]).providerCredentialFile,
+    tokenFile,
+  );
 });
 
 test("a host job is refused, asking nothing of the engine, while the Claude token file is anyone else's to open", async (t) => {

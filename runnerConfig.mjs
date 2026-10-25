@@ -14,6 +14,7 @@ import { win32 } from "node:path";
 import { z } from "zod";
 
 import { ownerImagesSchema } from "@chuggy/worker-core/containerBackend.mjs";
+import { imageUnusedSecsMaxDefault } from "@chuggy/worker-core/imageCleanup.mjs";
 import {
   jobEngineSocketEnvironment,
   reservedJobVariables,
@@ -28,6 +29,8 @@ import {
  * @property {string} logs where an ended job's logs and each service's own log are saved
  * @property {string} jobs where a job run on this machine itself has its directory
  * @property {string} runtime where each pool's pull credentials and env files live
+ * @property {string} images where the record of this machine's images is kept, one file per engine
+ * @property {string} dockerDisk where Docker Desktop keeps its VM's disk image unless the runner's file moves it
  *
  * @typedef {(file: string) => Promise<string | undefined>} SharedRefusal why someone besides this account may open `file`, said after its name, or nothing
  */
@@ -36,6 +39,11 @@ import {
 const runnerConfigBytesMax = 64 * 1024;
 
 const positiveSchema = z.number().int().positive().safe();
+
+const nonnegativeSchema = z.number().int().nonnegative().safe();
+
+/** The most GiB a floor in bytes can still name exactly. */
+const diskFreeGibMax = Math.floor(Number.MAX_SAFE_INTEGER / 2 ** 30);
 
 /**
  * Whether a bind mount's `source=` can name this absolute path: one with no
@@ -102,6 +110,27 @@ export const runnerConfigSchema = z
      * owner declares it meets: the first meeting every one the job names.
      */
     images: ownerImagesSchema.default([]),
+    /**
+     * How long a job's image this runner pulled may go unused before it is
+     * removed, 0 keeping them until the disk is under `diskFreeGibMin`.
+     */
+    imageUnusedSecsMax: nonnegativeSchema.default(imageUnusedSecsMaxDefault),
+    /**
+     * The GiB kept free for what Docker Desktop holds: under it the service
+     * removes the images it may and takes no job, and under half of it stops
+     * one. None is kept where it is 0.
+     */
+    diskFreeGibMin: nonnegativeSchema.max(diskFreeGibMax).default(20),
+    /**
+     * The directory holding Docker Desktop's disk image, `docker_data.vhdx`,
+     * where its settings moved it; the drive it is on is measured.
+     */
+    dockerDiskDirectory: z
+      .string()
+      .refine((directory) => win32.isAbsolute(directory), {
+        error: "must be an absolute path",
+      })
+      .optional(),
   })
   .superRefine((config, context) => {
     if (!config.engineSocket) return;
@@ -113,6 +142,14 @@ export const runnerConfigSchema = z
           message: "is the runner's to set while engineSocket is true",
         });
   });
+
+/**
+ * The kind of Claude credential `claudeTokenFile` is, which every workload is
+ * told, so that the core withholds what would choose another.
+ *
+ * @type {import("@chuggy/worker-core/claudeCredential.mjs").ClaudeCredentialSetting}
+ */
+export const runnerClaudeCredential = { kind: "Subscription" };
 
 /**
  * How many jobs and sessions each pool's service holds at once, in the file's
@@ -163,6 +200,8 @@ export function runnerPaths(environment, home) {
     logs: win32.join(local, "chuggy-windows", "logs"),
     jobs: win32.join(local, "chuggy-windows", "jobs"),
     runtime: win32.join(local, "chuggy-windows", "run"),
+    images: win32.join(local, "chuggy-windows", "images"),
+    dockerDisk: win32.join(local, "Docker", "wsl", "disk"),
   };
 }
 

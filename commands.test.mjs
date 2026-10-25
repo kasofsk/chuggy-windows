@@ -15,7 +15,7 @@ import test from "node:test";
 
 import { cliMain } from "./commands.mjs";
 import { controlServed, inFlightFixture } from "./control.fixture.mjs";
-import { deferred, fakeEngine } from "./engine.fixture.mjs";
+import { deferred, fakeDisk, fakeEngine } from "./engine.fixture.mjs";
 import {
   poolServiceAsked,
   poolServiceClaimed,
@@ -63,6 +63,7 @@ import { fakeTaskScheduler } from "./taskScheduler.fixture.mjs";
  * @property {(ms: number) => Promise<void>} [sleep]
  * @property {() => number} [nowMs]
  * @property {import("./poolService.mjs").PoolLocking} [locking]
+ * @property {import("./diskFree.mjs").DiskFreePorts} [disk]
  */
 
 /** A token source whose issuer has revoked the pool, so a pass ends without the network. */
@@ -130,6 +131,7 @@ async function called(argv, machine = {}) {
     engine: machine.engine ?? fakeEngine().engine,
     tokens: machine.tokens ?? deniedTokens,
     plane: machine.plane ?? unreachedPlane,
+    disk: machine.disk ?? fakeDisk(100),
     tasks: machine.tasks ?? fakeTaskScheduler().scheduler,
     sharedRefusal: machine.sharedRefusal ?? sharedFixture().sharedRefusal,
     userSid: async () => fixtureUserSid,
@@ -621,6 +623,7 @@ test("status and stop reach this pool's service, and status names each workload'
     [
       "service: running",
       "limits: concurrencyMax 3, sessionsMax 4",
+      "disk floor: 100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB",
       `${inFlightFixture.name}  session  pulling  i  asg-1`,
       "chuggy-shame-a  job  running  deadline 2027-01-15T08:00:00.000Z  asg-2",
       "chuggy-shame-b  session  running  deadline 2027-01-15T08:00:00.000Z  ses-1",
@@ -750,6 +753,7 @@ test("status names a job what a service from before sessions answers it is placi
     [
       "service: running",
       "limits: concurrencyMax 1, sessionsMax 2",
+      "disk floor: 100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB",
       `${inFlightFixture.name}  job  pulling  i  asg-1`,
     ].join("\n"),
   );
@@ -1282,7 +1286,7 @@ test("register asked wrongly exits 2 before the token is spent", async (t) => {
     [
       [...registerArgv, "--personal", "--pool", "shame"],
       {},
-      /^--pool names a pool, and a personal runner is its member's one in the tenant/u,
+      /^--pool names a pool, and a personal runner names none/u,
     ],
     [[...registerArgv, "extra"], {}, /^usage: chuggy-windows/u],
     [

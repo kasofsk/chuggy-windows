@@ -5,7 +5,8 @@
  * it ends.
  */
 
-import { readFileSync, writeSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /**
@@ -48,6 +49,39 @@ const failed = (stderr, code = 1) => ({
  * @returns {EngineAnswer}
  */
 const answered = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+
+/**
+ * A drive holding Docker Desktop's disk image with `drive` GiB free, and a VM
+ * with `vm` GiB free under its disk's mount, in 4 KiB blocks; either is one
+ * that cannot be measured where it is a string, which says why. Each
+ * measurement is recorded.
+ *
+ * @param {number | string} drive
+ * @param {number | string} [vm] as much as the drive where none
+ * @returns {import("./diskFree.mjs").DiskFreePorts & {measured: string[], wslCalls: (readonly string[])[]}}
+ */
+export function fakeDisk(drive, vm = drive) {
+  /** @type {string[]} */
+  const measured = [];
+  /** @type {(readonly string[])[]} */
+  const wslCalls = [];
+  return {
+    measured,
+    wslCalls,
+    statfs: async (path) => {
+      measured.push(path);
+      if (typeof drive === "string")
+        throw Object.assign(new Error(drive), { code: "ENOENT" });
+      return { bavail: drive * 2 ** 18, bsize: 4096 };
+    },
+    wsl: async (argv) => {
+      wslCalls.push([...argv]);
+      return typeof vm === "string"
+        ? { code: 1, stdout: `${vm}\n` }
+        : { code: 0, stdout: `${String(vm * 2 ** 18)} 4096\n` };
+    },
+  };
+}
 
 /** The variable an image sets, which an inspection lists beside the env file's. */
 const imagePath = "PATH=/usr/local/bin:/usr/bin:/bin";
@@ -112,6 +146,18 @@ function fakeEngineState() {
      * @type {string | undefined}
      */
     machine: /** @type {string | undefined} */ ("8 16624349184"),
+    /**
+     * All docker's `info` says of itself, as Docker Desktop's names its VM
+     * and its store, or nothing when that `info` fails.
+     *
+     * @type {Record<string, unknown> | undefined}
+     */
+    info: /** @type {Record<string, unknown> | undefined} */ ({
+      DockerRootDir: "/var/lib/docker",
+      Name: "docker-desktop",
+      OperatingSystem: "Docker Desktop",
+      DriverStatus: [["driver-type", "io.containerd.snapshotter.v1"]],
+    }),
     /**
      * What a network's inspection answers instead of finding it or not, as
      * an engine that cannot say.
@@ -292,6 +338,10 @@ function answer(state, call) {
     return state.machine === undefined
       ? failed("Error: cannot read the machine")
       : answered(`${state.machine}\n`);
+  if (verb === "info" && call.argv[2] === "{{json .}}")
+    return state.info === undefined
+      ? failed(unreachable)
+      : answered(`${JSON.stringify(state.info)}\n`);
   if (verb === "info")
     return answered(`${JSON.stringify(state.securityOptions)}\n`);
   if (verb === "context")
@@ -339,14 +389,16 @@ export function fakeEngine() {
       engineCall.signal?.throwIfAborted();
       return Promise.race([answer(state, call), aborted(engineCall.signal)]);
     },
-    execToFd: async (argv, fd) => {
+    execTail: async (argv) => {
       state.calls.push({ argv: [...argv], environment: {} });
       const reference = argv.at(-1) ?? "";
       const container = found(state, reference);
-      if (state.unreachable) return failed(unreachable);
-      if (state.logsFail || container === undefined) return missing(reference);
-      writeSync(fd, `the log of ${container.name}\n`);
-      return answered();
+      const none = { tail: Buffer.alloc(0), cut: false, lines: 0 };
+      if (state.unreachable) return { ...failed(unreachable), ...none };
+      if (state.logsFail || container === undefined)
+        return { ...missing(reference), ...none };
+      const tail = Buffer.from(`the log of ${container.name}\n`);
+      return { ...answered(), tail, cut: false, lines: 1 };
     },
   };
   return { engine, state };

@@ -41,6 +41,8 @@ const defaults = {
   network: "chuggy-jobs",
   engineSocket: false,
   images: [],
+  imageUnusedSecsMax: 604800,
+  diskFreeGibMin: 20,
 };
 
 /** A file no one else may open. */
@@ -101,6 +103,41 @@ test("sessionsMax is a whole number of none or more, read apart from concurrency
     const file = await written(directory, { ...minimal, sessionsMax });
     await assert.rejects(runnerConfig(file, ownerOnly), {
       message: `runner configuration ${file}: sessionsMax ${why}`,
+    });
+  }
+});
+
+test("the disk floor and an image's retention are whole numbers of none or more, and Docker Desktop's disk image is found where the file says", async (t) => {
+  const directory = await scratch(t);
+  const named = {
+    ...minimal,
+    diskFreeGibMin: 0,
+    imageUnusedSecsMax: 0,
+    dockerDiskDirectory: "D:\\DockerDesktopWSL\\disk",
+  };
+  assert.deepEqual(
+    await runnerConfig(await written(directory, named), ownerOnly),
+    { ...defaults, ...named },
+  );
+  for (const [key, value, why] of [
+    ["diskFreeGibMin", -1, "Too small: expected number to be >=0"],
+    ["diskFreeGibMin", 2.5, "Invalid input: expected int, received number"],
+    [
+      "diskFreeGibMin",
+      Math.floor(Number.MAX_SAFE_INTEGER / 2 ** 30) + 1,
+      `Too big: expected number to be <=${String(Math.floor(Number.MAX_SAFE_INTEGER / 2 ** 30))}`,
+    ],
+    ["imageUnusedSecsMax", -1, "Too small: expected number to be >=0"],
+    [
+      "imageUnusedSecsMax",
+      "604800",
+      "Invalid input: expected number, received string",
+    ],
+    ["dockerDiskDirectory", "Docker\\wsl\\disk", "must be an absolute path"],
+  ]) {
+    const file = await written(directory, { ...minimal, [key]: value });
+    await assert.rejects(runnerConfig(file, ownerOnly), {
+      message: `runner configuration ${file}: ${String(key)} ${String(why)}`,
     });
   }
 });
@@ -235,6 +272,8 @@ test("the runner's file and the pool files are under the roaming application dat
       logs: "E:\\Local\\chuggy-windows\\logs",
       jobs: "E:\\Local\\chuggy-windows\\jobs",
       runtime: "E:\\Local\\chuggy-windows\\run",
+      images: "E:\\Local\\chuggy-windows\\images",
+      dockerDisk: "E:\\Local\\Docker\\wsl\\disk",
     },
   );
 });
@@ -246,6 +285,8 @@ test("either application data folder unset, or not absolute, is its default unde
     logs: "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\logs",
     jobs: "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\jobs",
     runtime: "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\run",
+    images: "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\images",
+    dockerDisk: "C:\\Users\\op\\AppData\\Local\\Docker\\wsl\\disk",
   };
   for (const environment of [
     {},
