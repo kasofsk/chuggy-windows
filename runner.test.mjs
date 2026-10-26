@@ -626,8 +626,9 @@ test("a pull of the pool's registry is made at the endpoint Docker Desktop's con
 });
 
 /**
- * The engine's `run` of a job and then of a session, placed by a run whose
- * runner's file adds `runner` to the fixture's.
+ * The engine's `run` of a job and of a session, placed by a run whose
+ * runner's file adds `runner` to the fixture's, each found by its kind's
+ * label, since the two start in whichever order their placements finish.
  *
  * @param {import("node:test").TestContext} t
  * @param {Record<string, unknown>} [runner]
@@ -641,12 +642,17 @@ async function jobAndSessionRuns(t, runner = {}) {
   await backend.settled();
   const runs = composition.state.calls.filter((call) => call.argv[0] === "run");
   assert.equal(runs.length, 2);
-  return runs;
+  const kind = (/** @type {string} */ label) =>
+    runs.find((run) => run.argv.includes(`io.chuggy.kind=${label}`));
+  const job = kind("Job");
+  const session = kind("Session");
+  assert.ok(job !== undefined && session !== undefined);
+  return { job, session };
 }
 
 test("with engineSocket a job, and never a session, is handed Docker Desktop's socket read-only and added to root's group", async (t) => {
   const runs = await jobAndSessionRuns(t, { engineSocket: true });
-  const [job, session] = runs.map((run) => run.argv);
+  const [job, session] = [runs.job.argv, runs.session.argv];
   assert.ok(
     job.includes(
       "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock,readonly",
@@ -654,7 +660,7 @@ test("with engineSocket a job, and never a session, is handed Docker Desktop's s
     job.join(" "),
   );
   assert.equal(job[job.indexOf("--group-add") + 1], "0");
-  const told = runs[0].envFile ?? "";
+  const told = runs.job.envFile ?? "";
   assert.match(told, /^DOCKER_HOST=unix:\/\/\/var\/run\/docker\.sock$/mu);
   assert.match(
     told,
@@ -704,7 +710,7 @@ test("a job runs on the runner's network with its limits, the Claude token file 
 });
 
 test("a job and a session are each told their Claude credential is a subscription's token", async (t) => {
-  for (const run of await jobAndSessionRuns(t))
+  for (const run of Object.values(await jobAndSessionRuns(t)))
     assert.match(
       run.envFile ?? "",
       new RegExp(
