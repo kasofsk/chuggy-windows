@@ -49,11 +49,15 @@ export const dockerDesktopDistribution = "docker-desktop";
 /** Where Docker Desktop's VM mounts the disk its engine stores on. */
 export const dockerDesktopDataMount = "/mnt/docker-desktop-disk";
 
-/** The cap on one `wsl.exe`, which guards a hung WSL and not a slow one. */
-const wslTimeoutMs = 20_000;
+/**
+ * The cap on one `wsl.exe`, which guards a hung WSL and not a slow one. With
+ * `engineInfoTimeoutMs` before it, it stays inside `diskFloorCallsMsMax`, so
+ * a slow measurement still answers the core in time.
+ */
+const wslTimeoutMs = 15_000;
 
 /** The cap on asking docker which machine it runs on, which guards a hung engine. */
-const engineInfoTimeoutMs = 15_000;
+export const engineInfoTimeoutMs = 8_000;
 
 /** Windows' own wsl.exe, never one the working directory or `Path` could put first. */
 const wslExe = win32.join(

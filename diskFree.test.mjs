@@ -9,10 +9,13 @@ import {
   diskFloorSaid,
   diskFreeLogged,
   engineDiskFree,
+  engineInfoTimeoutMs,
   vmDiskArgv,
   wslRunner,
   wslText,
 } from "./diskFree.mjs";
+import { diskFloorCallsMsMax } from "@chuggy/worker-core/diskFloor.mjs";
+
 import { fakeDisk, fakeEngine } from "./engine.fixture.mjs";
 import { runnerConfigSchema, runnerPaths } from "./runnerConfig.mjs";
 
@@ -448,6 +451,10 @@ test("wsl.exe is run with no input, no window, a cap and its own words in UTF-8,
   assert.equal(options.windowsHide, true);
   assert.equal(options.env.WSL_UTF8, "1");
   assert.ok(options.timeout > 0);
+  assert.ok(
+    options.timeout + engineInfoTimeoutMs < diskFloorCallsMsMax,
+    "a measurement answers within the core's cap",
+  );
 });
 
 test("a wsl.exe killed at its cap, or that could not start, answers -1", async () => {
