@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { setImmediate } from "node:timers";
 import test from "node:test";
 
 import {
@@ -7,6 +10,7 @@ import {
   diskFreeLogged,
   engineDiskFree,
   vmDiskArgv,
+  wslRunner,
   wslText,
 } from "./diskFree.mjs";
 import { fakeDisk, fakeEngine } from "./engine.fixture.mjs";
@@ -40,7 +44,13 @@ test("the free disk is the lower of the drive holding Docker Desktop's disk imag
   const lowDrive = fakeDisk(40, 900);
   assert.deepEqual(
     await engineDiskFree(configured(), paths, engineSaying(), lowDrive),
-    { free: 40 * gib, where: drive, drive: true, unmeasured: [] },
+    {
+      free: 40 * gib,
+      where: drive,
+      drive: true,
+      unmeasured: [],
+      driveMeasured: true,
+    },
   );
   assert.deepEqual(lowDrive.measured, [
     "C:\\Users\\op\\AppData\\Local\\Docker\\wsl\\disk",
@@ -50,10 +60,10 @@ test("the free disk is the lower of the drive holding Docker Desktop's disk imag
     "-d",
     "docker-desktop",
     "-e",
-    "stat",
-    "-f",
+    "sh",
     "-c",
-    "%a %S",
+    'mountpoint -q "$1" || { echo "$1 is not a mount" >&2; exit 1; }; stat -f -c "%a %S" "$1"',
+    "sh",
     "/mnt/docker-desktop-disk",
   ]);
   const lowVm = fakeDisk(200, 12.5);
@@ -69,6 +79,7 @@ test("the free disk is the lower of the drive holding Docker Desktop's disk imag
       where: vm,
       drive: false,
       unmeasured: [],
+      driveMeasured: true,
     },
   );
   assert.deepEqual(lowVm.measured, ["D:\\DockerDesktopWSL\\disk"]);
@@ -85,6 +96,7 @@ test("a place that cannot be measured is left out and said, and with neither the
       unmeasured: [
         "Docker Desktop's VM could not be measured at /mnt/docker-desktop-disk: There is no distribution with the supplied name.",
       ],
+      driveMeasured: true,
     },
   );
   const noDrive = fakeDisk("ENOENT: no such file or directory", 300);
@@ -97,6 +109,7 @@ test("a place that cannot be measured is left out and said, and with neither the
       unmeasured: [
         "the drive holding Docker Desktop's disk image could not be measured at C:\\Users\\op\\AppData\\Local\\Docker\\wsl\\disk: ENOENT: no such file or directory",
       ],
+      driveMeasured: false,
     },
   );
   assert.deepEqual(
@@ -113,11 +126,48 @@ test("a place that cannot be measured is left out and said, and with neither the
   );
 });
 
-test("a VM answer that is not two counts, or a wsl.exe that failed saying nothing, is unmeasured", async () => {
+test("the VM's free disk is the last line of two counts it prints, whatever wsl.exe says beside it", async () => {
+  for (const stdout of [
+    "wsl: A localhost proxy configuration was detected but not mirrored\n4096 4096\n",
+    "4096 4096\r\n",
+  ]) {
+    const disk = {
+      ...fakeDisk(900),
+      wsl: async () => ({
+        code: 0,
+        stdout,
+        stderr: "wsl: Failed to start the systemd user session\n",
+      }),
+    };
+    const measured = await engineDiskFree(
+      configured(),
+      paths,
+      engineSaying(),
+      disk,
+    );
+    assert.deepEqual(
+      "unknown" in measured ? measured : [measured.free, measured.where],
+      [2 ** 24, vm],
+    );
+  }
+});
+
+test("a VM answer that is not two counts, a data disk that is not mounted, or a wsl.exe that failed saying nothing, is unmeasured, said by its errors first", async () => {
   for (const [answer, why] of [
-    [{ code: 0, stdout: "stat: applet not found\n" }, "stat: applet not found"],
-    [{ code: 0, stdout: "12 4096 7\n" }, "12 4096 7"],
-    [{ code: -1, stdout: "" }, "wsl.exe exited -1"],
+    [
+      { code: 0, stdout: "stat: applet not found\n", stderr: "" },
+      "stat: applet not found",
+    ],
+    [{ code: 0, stdout: "12 4096 7\n", stderr: "" }, "12 4096 7"],
+    [
+      {
+        code: 1,
+        stdout: "",
+        stderr: "/mnt/docker-desktop-disk is not a mount\n",
+      },
+      "/mnt/docker-desktop-disk is not a mount",
+    ],
+    [{ code: -1, stdout: "", stderr: "" }, "wsl.exe exited -1"],
   ]) {
     const disk = { ...fakeDisk(40), wsl: async () => answer };
     const measured = await engineDiskFree(
@@ -175,23 +225,43 @@ test("the floor is said against what is free: over it, under it, under half of i
   const said = (/** @type {number} */ free, /** @type {number} */ vmFree) =>
     diskFloorSaid(config, paths, engineSaying(), fakeDisk(free, vmFree));
   const compact =
-    "; if the drive stays low once images are removed, the disk image needs compacting: wsl --shutdown, then Optimize-VHD -Mode Full or diskpart's compact vdisk";
+    "; if the drive stays low once images are removed, the disk image needs compacting: quit Docker Desktop, wsl --shutdown, then diskpart's compact vdisk, or Optimize-VHD -Mode Full where Hyper-V is installed";
   assert.deepEqual(await said(30, 900), {
     detail: `30 GiB free at ${drive}, over the floor of 30 GiB`,
     warning: false,
+    failed: false,
   });
   assert.deepEqual(await said(15, 900), {
     detail: `15 GiB free at ${drive}, under the floor of 30 GiB: the service removes the images it may and takes no job until it is over${compact}`,
     warning: true,
+    failed: false,
   });
   assert.deepEqual(await said(14.5, 900), {
     detail: `14.5 GiB free at ${drive}, under half the floor of 30 GiB: the service removes the images it may, and stops a job each pass it is still under half${compact}`,
     warning: true,
+    failed: false,
   });
   assert.deepEqual(await said(900, 14), {
     detail: `14 GiB free at ${vm}, under half the floor of 30 GiB: the service removes the images it may, and stops a job each pass it is still under half`,
     warning: true,
+    failed: false,
   });
+});
+
+test("a floor held on the VM alone, the drive unmeasured, fails", async () => {
+  assert.deepEqual(
+    await diskFloorSaid(
+      configured(),
+      paths,
+      engineSaying(),
+      fakeDisk("ENOENT: no such file or directory", 300),
+    ),
+    {
+      detail: `300 GiB free at ${vm}, over the floor of 20 GiB; only that, since the drive holding Docker Desktop's disk image could not be measured at C:\\Users\\op\\AppData\\Local\\Docker\\wsl\\disk: ENOENT: no such file or directory`,
+      warning: true,
+      failed: true,
+    },
+  );
 });
 
 test("a floor of 0 is none and measures nothing, and a free disk that could not be measured holds none and is warned of", async () => {
@@ -206,6 +276,7 @@ test("a floor of 0 is none and measures nothing, and a free disk that could not 
     {
       detail: "none: the runner's file sets diskFreeGibMin to 0",
       warning: false,
+      failed: false,
     },
   );
   assert.deepEqual([disk.measured, disk.wslCalls], [[], []]);
@@ -220,18 +291,20 @@ test("a floor of 0 is none and measures nothing, and a free disk that could not 
       detail:
         "none held, since the free disk could not be measured: docker names its machine elsewhere, not Docker Desktop's VM, so this runner cannot measure where it stores what it holds",
       warning: true,
+      failed: false,
     },
   );
 });
 
 test("the core is handed the lowest measured alone, and the log says each time the places that could not be measured change", async () => {
+  const at = { drive: true, driveMeasured: true };
   /** @type {import("./diskFree.mjs").DockerDiskFree[]} */
   const answers = [
-    { free: 5 * gib, where: drive, drive: true, unmeasured: [] },
-    { free: 5 * gib, where: drive, drive: true, unmeasured: ["no VM"] },
-    { free: 6 * gib, where: drive, drive: true, unmeasured: ["no VM"] },
+    { free: 5 * gib, where: drive, ...at, unmeasured: [] },
+    { free: 5 * gib, where: drive, ...at, unmeasured: ["no VM"] },
+    { free: 6 * gib, where: drive, ...at, unmeasured: ["no VM"] },
     { unknown: "no engine" },
-    { free: 7 * gib, where: vm, drive: false, unmeasured: [] },
+    { free: 7 * gib, where: vm, ...at, drive: false, unmeasured: [] },
   ];
   /** @type {string[]} */
   const log = [];
@@ -261,4 +334,130 @@ test("wsl.exe's own words are read as the UTF-16 it writes, and a Linux program'
   );
   assert.equal(wslText(Buffer.from("222707232 4096\n")), "222707232 4096\n");
   assert.equal(wslText(Buffer.alloc(0)), "");
+});
+
+test("a measurement asked for while one is still being made shares it, and the next is made afresh", async () => {
+  /** @type {Array<(free: number) => void>} */
+  const pending = [];
+  const measured = diskFreeLogged(
+    () =>
+      new Promise((resolve) =>
+        pending.push((free) =>
+          resolve({
+            free,
+            where: drive,
+            drive: true,
+            driveMeasured: true,
+            unmeasured: [],
+          }),
+        ),
+      ),
+    () => undefined,
+  );
+  const first = measured();
+  const second = measured();
+  assert.equal(pending.length, 1);
+  pending[0](3);
+  assert.deepEqual(await Promise.all([first, second]), [
+    { free: 3, where: drive },
+    { free: 3, where: drive },
+  ]);
+  const third = measured();
+  assert.equal(pending.length, 2);
+  pending[1](4);
+  assert.deepEqual(await third, { free: 4, where: drive });
+});
+
+test("an engine that does not say which machine it runs on in time is unknown, and nothing is measured", async () => {
+  const disk = fakeDisk(40);
+  /** @type {Array<AbortSignal | undefined>} */
+  const signals = [];
+  /** @type {import("@chuggy/worker-core/engine.mjs").Engine} */
+  const hung = {
+    ...fakeEngine().engine,
+    exec: async (_argv, call = {}) => {
+      signals.push(call.signal);
+      throw new globalThis.DOMException(
+        "The operation timed out.",
+        "TimeoutError",
+      );
+    },
+  };
+  assert.deepEqual(await engineDiskFree(configured(), paths, hung, disk), {
+    unknown: "docker did not say which machine it runs on in time",
+  });
+  assert.ok(signals[0] instanceof globalThis.AbortSignal);
+  assert.equal(signals[0]?.aborted, false);
+  assert.deepEqual([disk.measured, disk.wslCalls], [[], []]);
+});
+
+/**
+ * A child `wslRunner` starts, writing `out` and `err` and then closing with
+ * `code`, or never closing where `code` is undefined, recording what it was
+ * started with.
+ *
+ * @param {{out?: Buffer, err?: Buffer, code?: number | null, error?: Error}} child
+ * @param {unknown[][]} started
+ */
+function fakeWsl(child, started) {
+  return /** @type {any} */ (
+    (/** @type {unknown[]} */ ...args) => {
+      started.push(args);
+      const emitter = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      });
+      setImmediate(() => {
+        if (child.error !== undefined) {
+          emitter.emit("error", child.error);
+          return;
+        }
+        if (child.out !== undefined) emitter.stdout.write(child.out);
+        if (child.err !== undefined) emitter.stderr.write(child.err);
+        setImmediate(() => emitter.emit("close", child.code ?? null));
+      });
+      return emitter;
+    }
+  );
+}
+
+test("wsl.exe is run with no input, no window, a cap and its own words in UTF-8, each stream kept apart", async () => {
+  /** @type {unknown[][]} */
+  const started = [];
+  const answer = await wslRunner(
+    fakeWsl(
+      {
+        out: Buffer.from("4096 4096\n"),
+        err: Buffer.from("wsl: a warning\r\n", "utf16le"),
+        code: 0,
+      },
+      started,
+    ),
+  )(vmDiskArgv);
+  assert.deepEqual(answer, {
+    code: 0,
+    stdout: "4096 4096\n",
+    stderr: "wsl: a warning\r\n",
+  });
+  const [command, argv, options] = /** @type {[string, string[], any]} */ (
+    started[0]
+  );
+  assert.match(command, /\\System32\\wsl\.exe$/u);
+  assert.deepEqual(argv, [...vmDiskArgv]);
+  assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(options.windowsHide, true);
+  assert.equal(options.env.WSL_UTF8, "1");
+  assert.ok(options.timeout > 0);
+});
+
+test("a wsl.exe killed at its cap, or that could not start, answers -1", async () => {
+  assert.deepEqual(await wslRunner(fakeWsl({ code: null }, []))(["-l"]), {
+    code: -1,
+    stdout: "",
+    stderr: "",
+  });
+  assert.deepEqual(
+    await wslRunner(fakeWsl({ error: new Error("spawn ENOENT") }, []))(["-l"]),
+    { code: -1, stdout: "", stderr: "spawn ENOENT" },
+  );
 });

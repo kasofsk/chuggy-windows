@@ -167,7 +167,8 @@ function failureMessage(failure) {
 
 /**
  * The free disk against the floor the runner's file sets, warned of where
- * any place could not be measured or it is under the floor.
+ * any place could not be measured or it is under the floor, and failed where
+ * the drive could not be.
  *
  * @param {Engine} engine
  * @param {RunnerConfig} config
@@ -176,12 +177,18 @@ function failureMessage(failure) {
  */
 async function diskFloorFinding(engine, config, input) {
   const check = "disk floor";
-  const { detail, warning } = await diskFloorSaid(
+  const { detail, warning, failed } = await diskFloorSaid(
     config,
     input.paths,
     engine,
     input.disk,
   );
+  if (failed)
+    return {
+      check,
+      passed: false,
+      detail: `${detail}; set dockerDiskDirectory to the directory holding docker_data.vhdx`,
+    };
   return warning
     ? { check, passed: true, warning: true, detail }
     : { check, passed: true, detail };

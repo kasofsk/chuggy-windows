@@ -218,7 +218,7 @@ test("a machine ready to run passes every check, and doctor changes nothing", as
   assert.deepEqual(scheduler.argvs(), [serviceQueryArgv(taskName)]);
 });
 
-test("the disk floor is warned of where the free disk is under it, or where Docker Desktop's VM could not be measured, and passes still", async (t) => {
+test("the disk floor is warned of where the free disk is under it, or where Docker Desktop's VM could not be measured, and fails where the drive could not be", async (t) => {
   const under = await doctored(t, {
     runner: { diskFreeGibMin: 30 },
     disk: fakeDisk(80, 20),
@@ -239,6 +239,13 @@ test("the disk floor is warned of where the free disk is under it, or where Dock
     warning: true,
     detail:
       "50 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB; only that, since Docker Desktop's VM could not be measured at /mnt/docker-desktop-disk: There is no distribution with the supplied name.",
+  });
+  const noDrive = await doctored(t, { disk: fakeDisk("ENOENT: gone", 300) });
+  assert.deepEqual(finding(noDrive.findings, "disk floor"), {
+    check: "disk floor",
+    passed: false,
+    detail:
+      "300 GiB free at /mnt/docker-desktop-disk in Docker Desktop's VM, over the floor of 20 GiB; only that, since the drive holding Docker Desktop's disk image could not be measured at C:\\Users\\op\\AppData\\Local\\Docker\\wsl\\disk: ENOENT: gone; set dockerDiskDirectory to the directory holding docker_data.vhdx",
   });
   const off = await doctored(t, {
     runner: { diskFreeGibMin: 0 },

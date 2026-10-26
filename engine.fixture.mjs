@@ -77,8 +77,8 @@ export function fakeDisk(drive, vm = drive) {
     wsl: async (argv) => {
       wslCalls.push([...argv]);
       return typeof vm === "string"
-        ? { code: 1, stdout: `${vm}\n` }
-        : { code: 0, stdout: `${String(vm * 2 ** 18)} 4096\n` };
+        ? { code: 1, stdout: "", stderr: `${vm}\n` }
+        : { code: 0, stdout: `${String(vm * 2 ** 18)} 4096\n`, stderr: "" };
     },
   };
 }
