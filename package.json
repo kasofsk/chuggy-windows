@@ -12,8 +12,8 @@
     "chuggy-windows": "cli.mjs"
   },
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.18.0/chuggy-worker-contract-1.18.0.tgz",
-    "@chuggy/worker-core": "git+file:///Users/apple/eanna/chuggy/chuggy-common#c30298f201957300e63cc63bea3d3f59fb4aeeae",
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.20.0/chuggy-worker-contract-1.20.0.tgz",
+    "@chuggy/worker-core": "git+file:///Users/apple/eanna/chuggy/chuggy-common#30e515ab5d8b8b057cfe7310dee6cb28b048a878",
     "zod": "4.5.4"
   },
   "bundleDependencies": [
