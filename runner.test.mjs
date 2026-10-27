@@ -31,6 +31,7 @@ import {
   runnerLeftoversRemoved,
   runnerCapabilities,
   runnerLoop,
+  runnerClaimLock,
   runnerMemoryLock,
   runnerParts,
   runnerSetup,
@@ -870,6 +871,14 @@ test("a run says in its log when Docker Desktop's VM cannot be measured, and hol
 });
 
 /**
+ * What a poll tells the plane of the fake engine's memory with `roomMib` of
+ * room, its ceiling the whole of it.
+ *
+ * @param {number} roomMib
+ */
+const roomOf = (roomMib) => ({ memory: { roomMib, ceilingMib: 16 * 1024 } });
+
+/**
  * A run over a fake engine whose jobs' and sessions' planes answer every call
  * and record it, polled by a plane answering `polls` in turn and recording
  * what each poll asked, its held assignments sorted.
@@ -1010,9 +1019,9 @@ test("a pass places a session the plane offers as a session, and its end reaches
     ended: 2,
   });
   assert.deepEqual(pollsAsked, [
-    ["pool-token", [], 1, 2],
-    ["pool-token", ["asg-1", "ses-1"], 0, 1],
-    ["pool-token", [], 1, 2],
+    ["pool-token", [], 1, 2, roomOf(16 * 1024)],
+    ["pool-token", ["asg-1", "ses-1"], 0, 1, roomOf(0)],
+    ["pool-token", [], 1, 2, roomOf(16 * 1024)],
   ]);
   assert.deepEqual(askedUnder(asked, "ses-1"), [
     [
@@ -1413,12 +1422,34 @@ test("a run is refused on a machine no pool runs on, and where it would advertis
   );
 });
 
-test("every pool's service of this account takes one memory lock, in the runner's runtime directory", async (t) => {
+test("every pool's service of this account takes one memory lock and one claim lock, in the runner's runtime directory", async (t) => {
   const { paths } = await runnerFixture(t);
-  assert.equal(
-    runnerMemoryLock(paths),
-    "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\run\\memory\\docker.lock",
-  );
+  const memory = "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\run\\memory";
+  assert.equal(runnerMemoryLock(paths), `${memory}\\docker.lock`);
+  assert.equal(runnerClaimLock(paths), `${memory}\\docker.claim`);
+});
+
+test("a run's ceiling for a job is its budget less the GiB its file reserves, none unless it says, and its service claims jobs under the claim lock", async (t) => {
+  for (const [memoryReservedGib, ceilingMib] of /** @type {const} */ ([
+    [undefined, 16 * 1024],
+    [6, 10 * 1024],
+    [20, 0],
+  ])) {
+    const { runner, setup } = await composed(t, {
+      runner: memoryReservedGib === undefined ? {} : { memoryReservedGib },
+    });
+    await runner.client.backend.held();
+    assert.deepEqual(runner.client.backend.memoryRoom?.(), {
+      roomMib: 16 * 1024,
+      ceilingMib,
+    });
+    const lock = runnerClaimLock(setup.paths);
+    const release = await runner.client.backend.claimed?.();
+    assert.ok(release !== undefined);
+    assert.equal(existsSync(lock), true);
+    await release();
+    assert.equal(existsSync(lock), false);
+  }
 });
 
 test("a run's memory budget is Docker Desktop's memory less the GiB its file keeps free, none unless it says, and it takes no job without room", async (t) => {

@@ -56,7 +56,7 @@ import {
   diskFreePorts,
   engineDiskFree,
 } from "./diskFree.mjs";
-import { memoryFreeBytes } from "./memoryFree.mjs";
+import { memoryFreeBytes, memoryReservedBytes } from "./memoryFree.mjs";
 import {
   claudeTokenFileRefusal,
   runnerClaudeCredential,
@@ -167,6 +167,34 @@ export async function runnerDirectoriesChecked(paths, poolFile, sharedRefusal) {
  */
 export function runnerMemoryLock(paths) {
   return win32.join(paths.runtime, "memory", "docker.lock");
+}
+
+/**
+ * The lock a service takes to ask a plane that claims by room for jobs, so
+ * no two are given the same room: one for every pool's service of this
+ * account, beside the memory lock.
+ *
+ * @param {RunnerPaths} paths
+ */
+export function runnerClaimLock(paths) {
+  return win32.join(paths.runtime, "memory", "docker.claim");
+}
+
+/**
+ * What the container backend is told of Docker Desktop's memory: the budget
+ * the runner's file keeps and reserves, and the two locks every pool's
+ * service of this account shares.
+ *
+ * @param {RunnerConfig} config
+ * @param {RunnerPaths} paths
+ */
+function runnerMemorySettings(config, paths) {
+  return {
+    memoryFreeBytesMin: memoryFreeBytes(config),
+    memoryReservedBytes: memoryReservedBytes(config),
+    memoryLock: runnerMemoryLock(paths),
+    memoryClaimLock: runnerClaimLock(paths),
+  };
 }
 
 /**
@@ -318,8 +346,7 @@ export async function runnerParts(setup, host) {
       imageRecord: win32.join(paths.images, `${config.engine}.json`),
       imageUnusedSecsMax: config.imageUnusedSecsMax,
       diskFreeBytesMin: diskFloorBytes(config),
-      memoryFreeBytesMin: memoryFreeBytes(config),
-      memoryLock: runnerMemoryLock(paths),
+      ...runnerMemorySettings(config, paths),
     },
     {
       engine,

@@ -44,6 +44,7 @@ const defaults = {
   imageUnusedSecsMax: 604800,
   diskFreeGibMin: 20,
   memoryFreeGibMin: 0,
+  memoryReservedGib: 0,
 };
 
 /** A file no one else may open. */
@@ -108,13 +109,14 @@ test("sessionsMax is a whole number of none or more, read apart from concurrency
   }
 });
 
-test("the disk floor, an image's retention and the memory kept free are whole numbers of none or more, and Docker Desktop's disk image is found where the file says", async (t) => {
+test("the disk floor, an image's retention, the memory kept free and the memory reserved from jobs are whole numbers of none or more, and Docker Desktop's disk image is found where the file says", async (t) => {
   const directory = await scratch(t);
   const named = {
     ...minimal,
     diskFreeGibMin: 0,
     imageUnusedSecsMax: 0,
     memoryFreeGibMin: 3,
+    memoryReservedGib: 1,
     dockerDiskDirectory: "D:\\DockerDesktopWSL\\disk",
   };
   assert.deepEqual(
@@ -138,6 +140,12 @@ test("the disk floor, an image's retention and the memory kept free are whole nu
     ["dockerDiskDirectory", "Docker\\wsl\\disk", "must be an absolute path"],
     ["memoryFreeGibMin", -1, "Too small: expected number to be >=0"],
     ["memoryFreeGibMin", 1.5, "Invalid input: expected int, received number"],
+    ["memoryReservedGib", -1, "Too small: expected number to be >=0"],
+    [
+      "memoryReservedGib",
+      "2",
+      "Invalid input: expected number, received string",
+    ],
   ]) {
     const file = await written(directory, { ...minimal, [key]: value });
     await assert.rejects(runnerConfig(file, ownerOnly), {
