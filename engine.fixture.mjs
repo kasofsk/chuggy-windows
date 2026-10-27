@@ -20,6 +20,8 @@ import { dirname } from "node:path";
  * @property {string} image
  * @property {string[]} [env] each `NAME=value`, as an inspection lists them
  * @property {number} [exitCode]
+ * @property {number} [memoryBytes] the cap `--memory` ran it with, none where 0
+ * @property {number} [usedBytes] what `stats` says it uses
  *
  * @typedef {object} FakeCall
  * @property {string[]} argv
@@ -119,6 +121,12 @@ function fakeEngineState() {
     /** @type {Map<string, FakeContainer>} */
     containers: new Map(),
     images: new Set(),
+    /**
+     * The named volumes there, each by its labels.
+     *
+     * @type {Map<string, Record<string, string>>}
+     */
+    volumes: new Map(),
     networks: new Set(),
     /** @type {FakeCall[]} */
     calls: [],
@@ -156,6 +164,7 @@ function fakeEngineState() {
       DockerRootDir: "/var/lib/docker",
       Name: "docker-desktop",
       OperatingSystem: "Docker Desktop",
+      MemTotal: 16 * 2 ** 30,
       DriverStatus: [["driver-type", "io.containerd.snapshotter.v1"]],
     }),
     /**
@@ -214,6 +223,7 @@ function run(state, call) {
   );
   const id = `c${String(state.nextId++).padStart(63, "0")}`;
   const image = argv.at(-1) ?? "";
+  const [memory] = flagValues(argv, "--memory");
   const env = [
     imagePath,
     ...call.envFile.split("\n").filter((line) => line.length > 0),
@@ -226,6 +236,8 @@ function run(state, call) {
     image,
     env,
     exitCode: 0,
+    memoryBytes:
+      memory === undefined ? 0 : Number(memory.replace(/m$/u, "")) * 2 ** 20,
   });
   if (state.runInterrupted)
     return { code: -1, stdout: "", stderr: "", failed: "Interrupted" };
@@ -248,6 +260,7 @@ function inspected(state, references) {
             Name: `/${container.name}`,
             Config: { Labels: container.labels, Env: container.env ?? null },
             State: { Status: container.status, ExitCode: container.exitCode },
+            HostConfig: { Memory: container.memoryBytes ?? 0 },
           },
         ],
   );
@@ -321,6 +334,90 @@ function networked(state, network, verb) {
 }
 
 /**
+ * The label filters of a listing, each as key and value, the value none
+ * where it asks only that the label is there.
+ *
+ * @param {string[]} argv
+ * @returns {[string, string | undefined][]}
+ */
+function labelFilters(argv) {
+  return flagValues(argv, "--filter").map((filter) => {
+    const [key, ...value] = filter.replace(/^label=/u, "").split("=");
+    return [key ?? "", value.length === 0 ? undefined : value.join("=")];
+  });
+}
+
+/**
+ * @param {Record<string, string>} labels
+ * @param {[string, string | undefined][]} wanted
+ */
+function labelsMatched(labels, wanted) {
+  return wanted.every(([key, value]) =>
+    value === undefined ? Object.hasOwn(labels, key) : labels[key] === value,
+  );
+}
+
+/**
+ * A `volume` call: an inspection of those named, a listing, a creation or a
+ * removal.
+ *
+ * @param {FakeEngineState} state
+ * @param {string[]} argv
+ */
+function volumed(state, argv) {
+  const last = argv.at(-1) ?? "";
+  if (argv[1] === "inspect") {
+    const names = argv.slice(2);
+    const absent = names.find((name) => !state.volumes.has(name));
+    return absent === undefined
+      ? answered(
+          `${JSON.stringify(names.map((name) => ({ Driver: "local", Labels: state.volumes.get(name), Name: name })))}\n`,
+        )
+      : failed(`Error response from daemon: get ${absent}: no such volume`);
+  }
+  if (argv[1] === "ls") {
+    const wanted = labelFilters(argv);
+    return answered(
+      [...state.volumes.entries()]
+        .filter(([, labels]) => labelsMatched(labels, wanted))
+        .map(([name]) => `${name}\n`)
+        .join(""),
+    );
+  }
+  if (argv[1] === "create") {
+    state.volumes.set(
+      last,
+      Object.fromEntries(
+        flagValues(argv, "--label").map((label) => {
+          const equals = label.indexOf("=");
+          return [label.slice(0, equals), label.slice(equals + 1)];
+        }),
+      ),
+    );
+    return answered(`${last}\n`);
+  }
+  if (argv[1] === "rm" && state.volumes.delete(last))
+    return answered(`${last}\n`);
+  return failed(`Error response from daemon: get ${last}: no such volume`);
+}
+
+/**
+ * What `stats` prints of each running container: its name, and its use and
+ * limit in docker's binary units.
+ *
+ * @param {FakeEngineState} state
+ */
+function statsPrinted(state) {
+  return [...state.containers.values()]
+    .filter((container) => container.status === "running")
+    .map(
+      (container) =>
+        `${container.name} ${String((container.usedBytes ?? 0) / 2 ** 20)}MiB / 16GiB\n`,
+    )
+    .join("");
+}
+
+/**
  * @param {FakeEngineState} state
  * @param {FakeCall} call
  * @returns {EngineAnswer | Promise<EngineAnswer>}
@@ -350,14 +447,13 @@ function answer(state, call) {
       : answered(`${state.contextHost}\n`);
   if (verb === "run") return run(state, call);
   if (verb === "ps") {
-    const wanted = flagValues(call.argv, "--filter").map((filter) => {
-      const [key, ...value] = filter.replace(/^label=/u, "").split("=");
-      return [key, value.join("=")];
-    });
+    const wanted = labelFilters(call.argv);
     return answered(
       [...state.containers.values()]
-        .filter((container) =>
-          wanted.every(([key, value]) => container.labels[key] === value),
+        .filter(
+          (container) =>
+            (call.argv.includes("--all") || container.status === "running") &&
+            labelsMatched(container.labels, wanted),
         )
         .map((container) => `${container.id}\n`)
         .join(""),
@@ -372,6 +468,8 @@ function answer(state, call) {
   if (verb === "network" && state.networkInspectFails !== undefined)
     return failed(state.networkInspectFails);
   if (verb === "network") return networked(state, last, second);
+  if (verb === "volume") return volumed(state, call.argv);
+  if (verb === "stats") return answered(statsPrinted(state));
   return failed(`unknown command: ${call.argv.join(" ")}`);
 }
 
@@ -386,8 +484,9 @@ export function fakeEngine() {
         environment: { ...engineCall.environment },
       };
       state.calls.push(call);
-      engineCall.signal?.throwIfAborted();
-      return Promise.race([answer(state, call), aborted(engineCall.signal)]);
+      const signal = engineCall.signal ?? engineCall.cut;
+      signal?.throwIfAborted();
+      return Promise.race([answer(state, call), aborted(signal)]);
     },
     execTail: async (argv) => {
       state.calls.push({ argv: [...argv], environment: {} });

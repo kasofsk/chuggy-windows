@@ -3,7 +3,8 @@
  * the container backend beside the worker core's pool runner, which passes
  * until the plane denies the pool. Where the pool was registered with
  * `--host`, a job that pins no image runs on this machine itself, beside the
- * containers. Every command starts here.
+ * containers. Each poll advertises what the runner finds of this machine and
+ * its file when the run starts. Every command starts here.
  *
  * EVERY BACKEND IS TOLD THE KIND OF CLAUDE CREDENTIAL, a subscription's. The
  * core withholds what would choose another credential only from a workload
@@ -43,6 +44,10 @@ import {
   engineFailureLine,
 } from "@chuggy/worker-core/engineErrors.mjs";
 import { poolIdentityDigest } from "@chuggy/worker-core/poolIdentity.mjs";
+import {
+  registerAdvertised,
+  registerPlatform,
+} from "@chuggy/worker-core/register.mjs";
 import { runtimeScratch } from "@chuggy/worker-core/runtimeScratch.mjs";
 
 import {
@@ -51,6 +56,7 @@ import {
   diskFreePorts,
   engineDiskFree,
 } from "./diskFree.mjs";
+import { memoryFreeBytes } from "./memoryFree.mjs";
 import {
   claudeTokenFileRefusal,
   runnerClaudeCredential,
@@ -153,6 +159,50 @@ export async function runnerDirectoriesChecked(paths, poolFile, sharedRefusal) {
 }
 
 /**
+ * The lock a service takes to start a job into Docker Desktop's memory: one
+ * for every pool's service of this account, which share the runtime
+ * directory under the local application data.
+ *
+ * @param {RunnerPaths} paths
+ */
+export function runnerMemoryLock(paths) {
+  return win32.join(paths.runtime, "memory", "docker.lock");
+}
+
+/**
+ * The capabilities each poll of a pool's run advertises, found when it
+ * starts: the platform its containers run, this machine's own beside it
+ * where the pool was registered with `--host`, the agents the runner's file
+ * can run, and what the file's `capabilities` declares or, where it is
+ * absent, the rest of what the pool was registered with. A machine no pool
+ * runs on, and a set past the contract's bound, are refused.
+ *
+ * @param {Pick<RunnerSetup, "credentials" | "config" | "paths">} setup
+ * @param {string} arch as `process.arch` names this machine
+ * @returns {string[]}
+ */
+export function runnerCapabilities(setup, arch) {
+  const { credentials, config, paths } = setup;
+  const found = registerPlatform(arch);
+  if ("refused" in found) throw new Error(found.refused);
+  const host = credentials.host === true;
+  const hosted = host ? hostPlatform(arch) : undefined;
+  const advertised = registerAdvertised({
+    platforms: [found.platform, ...(hosted === undefined ? [] : [hosted])],
+    files: { tokenFile: config.claudeTokenFile },
+    images: config.images,
+    host,
+    declared: config.capabilities,
+    recorded: credentials.capabilities,
+  });
+  if ("refused" in advertised)
+    throw new Error(
+      `runner configuration ${paths.config}: capabilities: ${advertised.refused}`,
+    );
+  return advertised.capabilities;
+}
+
+/**
  * @param {RunnerConfig} config
  * @returns {Engine}
  */
@@ -230,11 +280,15 @@ export async function engineMachine(engine) {
 
 /**
  * @param {RunnerSetup} setup
- * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal, engine?: Engine, tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, places?: boolean, disk?: import("./diskFree.mjs").DiskFreePorts, spawn?: typeof spawn}} host where its log lines go, who besides this account may open a file, the engine and token source when not those the files name, the fetch a job's or a session's plane is reached by when not the global one, `places: false` for a run that places nothing, which then composes no host backend: a job on this machine itself is stopped only through the service, what the free disk is measured by when not this machine's own, and what starts a job on this machine itself when not `hostJobSpawned`
+ * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal, engine?: Engine, tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, places?: boolean, disk?: import("./diskFree.mjs").DiskFreePorts, spawn?: typeof spawn, arch?: string}} host where its log lines go, who besides this account may open a file, the engine and token source when not those the files name, the fetch a job's or a session's plane is reached by when not the global one, `places: false` for a run that places nothing, which then composes no host backend and advertises nothing: a job on this machine itself is stopped only through the service, what the free disk is measured by when not this machine's own, what starts a job on this machine itself when not `hostJobSpawned`, and this machine as `process.arch` names it when not this one
  * @returns {Promise<Runner>}
  */
 export async function runnerParts(setup, host) {
   const { credentials, config, paths } = setup;
+  const capabilities =
+    host.places === false
+      ? undefined
+      : runnerCapabilities(setup, host.arch ?? process.arch);
   const runtimeDir = poolRuntimeDirectory(paths, credentials);
   const engine = host.engine ?? runnerEngine(config);
   const dockerHost = await engineEndpoint(engine);
@@ -264,6 +318,8 @@ export async function runnerParts(setup, host) {
       imageRecord: win32.join(paths.images, `${config.engine}.json`),
       imageUnusedSecsMax: config.imageUnusedSecsMax,
       diskFreeBytesMin: diskFloorBytes(config),
+      memoryFreeBytesMin: memoryFreeBytes(config),
+      memoryLock: runnerMemoryLock(paths),
     },
     {
       engine,
@@ -287,7 +343,7 @@ export async function runnerParts(setup, host) {
     credentials,
     backend,
     { concurrencyMax: config.concurrencyMax, sessionsMax: config.sessionsMax },
-    { tokens, fetch: host.fetch },
+    { tokens, fetch: host.fetch, capabilities },
   );
   return { runtime: runtimeDir, engine, disk, backend, client };
 }

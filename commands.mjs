@@ -21,6 +21,7 @@ import {
 
 import { controlServer } from "@chuggy/worker-core/control.mjs";
 import { diskFloorSaid, diskFreePorts } from "./diskFree.mjs";
+import { memoryBudgetSaid } from "./memoryFree.mjs";
 import { doctorFindings, findingLine } from "./doctor.mjs";
 import {
   poolHeldCode,
@@ -117,9 +118,9 @@ const usage = `usage: chuggy-windows <command> [--pool <file>]
                           or with --personal a member's personal token for
                           their personal runner's file, and start its service
                           where it can; it declares the platform its
-                          containers run and each --capability, which the
-                          token must permit, and with --host runs a job that
-                          pins no image on this machine itself
+                          containers run and each --capability, and with
+                          --host runs a job that pins no image on this
+                          machine itself
   run                     run the pool until the plane denies it
   service                 what the pool's task runs: run, started again
                           after it ends unless the plane denied the pool
@@ -156,6 +157,7 @@ async function started(call, run = { places: true }) {
     fetch: call.host.fetch,
     places: run.places,
     disk: call.host.disk,
+    arch: call.host.arch,
   });
   const holder = await poolServiceFound(runner.runtime, call.host.locking);
   return { setup, runner, holder, pipe: holder?.pipe };
@@ -331,9 +333,12 @@ async function status(call) {
     runner.disk,
   );
   call.host.out(`disk floor: ${disk.detail}`);
+  call.host.out(
+    `memory: ${await memoryBudgetSaid(setup.config, runner.engine)}`,
+  );
   for (const placement of answered?.inFlight ?? [])
     call.host.out(
-      `${placement.name}  ${statusKind(placement)}  ${placement.phase.toLowerCase()}  ${placement.image}  ${placement.assignment}`,
+      `${placement.name}  ${statusKind(placement)}  ${placement.phase.toLowerCase()}  ${placement.image}  ${placement.assignment}${placement.waiting === undefined ? "" : `  waiting: ${placement.waiting}`}`,
     );
   for (const container of containers)
     call.host.out(
@@ -387,6 +392,7 @@ function doctorFound(host, poolFile) {
     node: host.node,
     cli: host.cli,
     disk: host.disk ?? diskFreePorts,
+    arch: host.arch,
     parts: {
       engine: (config) => host.engine ?? runnerEngine(config),
       tokens: (credentials) => host.tokens ?? poolRunnerTokens(credentials),

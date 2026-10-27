@@ -2,8 +2,9 @@
  * What `doctor` checks, in the order a run depends on them, each answered as
  * passed or not with what was found, and before the engine whether the pool
  * file's task runs this copy. It changes nothing: a missing network is
- * reported for a run to make, and its one poll names nothing held and wants
- * nothing, which the plane answers without granting or releasing a lease.
+ * reported for a run to make, and its one poll names nothing held, wants
+ * nothing and advertises nothing, which the plane answers without granting
+ * or releasing a lease or changing what the pool advertised.
  */
 
 import { stat } from "node:fs/promises";
@@ -39,6 +40,7 @@ import {
   engineEndpoint,
   engineMachine,
   engineSocketHanded,
+  runnerCapabilities,
   runnerSecretDirectories,
 } from "./runner.mjs";
 import {
@@ -75,6 +77,7 @@ import {
  * @property {string} node the Node binary running this
  * @property {string} cli this CLI's entry, as an absolute path
  * @property {import("./diskFree.mjs").DiskFreePorts} disk what the free disk is measured by
+ * @property {string} arch this machine, as `process.arch` names it
  * @property {DoctorParts} parts
  */
 
@@ -340,6 +343,38 @@ async function directoriesFinding(input) {
   };
 }
 
+/**
+ * What this pool's run advertises on each poll, as a run finds it when it
+ * starts, and where what is neither a platform nor an agent comes from; or,
+ * where it cannot be found, why a run would be refused.
+ *
+ * @param {DoctorInput} input
+ * @param {PoolCredentials} credentials
+ * @param {RunnerConfig} config
+ * @returns {DoctorFinding}
+ */
+function capabilitiesFinding(input, credentials, config) {
+  const check = "capabilities";
+  let advertised;
+  try {
+    advertised = runnerCapabilities(
+      { credentials, config, paths: input.paths },
+      input.arch,
+    );
+  } catch (failure) {
+    return { check, passed: false, detail: failureMessage(failure) };
+  }
+  const rest =
+    config.capabilities === undefined
+      ? "the rest of what the pool was registered with"
+      : "its capabilities";
+  return {
+    check,
+    passed: true,
+    detail: `a run advertises ${advertised.join(", ")} on each poll: the platforms it runs, the agents ${input.paths.config} can run, and ${rest}`,
+  };
+}
+
 /** @param {DoctorFinding} finding */
 export function findingLine(finding) {
   const label =
@@ -381,6 +416,8 @@ export async function doctorFindings(input) {
     findings.push(hostJobsFinding(credentials, config));
   findings.push(await serviceTaskFinding(input));
   if (credentials === undefined) return findings;
+  if (config !== undefined)
+    findings.push(capabilitiesFinding(input, credentials, config));
   if (config !== undefined)
     await engineChecks(
       input.parts.engine(config),

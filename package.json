@@ -35,6 +35,7 @@
     "commands.mjs",
     "diskFree.mjs",
     "doctor.mjs",
+    "memoryFree.mjs",
     "nodeFloor.mjs",
     "poolService.mjs",
     "runner.mjs",

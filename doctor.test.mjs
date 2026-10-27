@@ -20,6 +20,7 @@ import { fakeTaskScheduler } from "./taskScheduler.fixture.mjs";
 
 /** The copy doctor is run as, and the Node it runs under. */
 const copy = {
+  arch: "x64",
   node: "C:\\Program Files\\nodejs\\node.exe",
   cli: "C:\\Users\\op\\AppData\\Roaming\\npm\\node_modules\\chuggy-windows\\cli.mjs",
 };
@@ -144,6 +145,15 @@ async function doctored(t, options = {}) {
 const finding = (findings, check) =>
   findings.find((found) => found.check === check);
 
+/**
+ * What doctor finds the fixture's pool advertises: the platform its
+ * containers run and the `container` it was registered with.
+ *
+ * @param {import("./runnerConfig.mjs").RunnerPaths} paths
+ */
+const advertisedFrom = (paths) =>
+  `a run advertises Platform:Linux:Amd64, container on each poll: the platforms it runs, the agents ${paths.config} can run, and the rest of what the pool was registered with`;
+
 /** What the disk floor finds of a fake disk with 100 GiB free everywhere. */
 const diskOver =
   "100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB";
@@ -177,6 +187,7 @@ test("a machine ready to run passes every check, and doctor changes nothing", as
       passed: true,
       detail: `none yet named ${taskName}`,
     },
+    { check: "capabilities", passed: true, detail: advertisedFrom(paths) },
     {
       check: "container engine",
       passed: true,
@@ -713,4 +724,30 @@ test("a runner's file a host job cannot run under fails the host jobs check: an 
     runner: { timeoutSecsMax: hostTimeoutSecsMax },
   });
   assert.equal(finding(atCap.findings, "host jobs")?.passed, true);
+});
+
+test("a pool registered with --host advertises this machine's platform beside its containers', and the agent it runs here; a file declaring too much fails", async (t) => {
+  const hosted = await doctored(t, { pool: hostedPool });
+  assert.deepEqual(finding(hosted.findings, "capabilities"), {
+    check: "capabilities",
+    passed: true,
+    detail: `a run advertises Platform:Linux:Amd64, Platform:Windows:Amd64, Agent:Claude on each poll: the platforms it runs, the agents ${hosted.paths.config} can run, and the rest of what the pool was registered with`,
+  });
+  const declared = await doctored(t, {
+    runner: { capabilities: ["gpu", "Agent:Claude"] },
+  });
+  assert.equal(
+    finding(declared.findings, "capabilities")?.detail,
+    `a run advertises Platform:Linux:Amd64, gpu, Agent:Claude on each poll: the platforms it runs, the agents ${declared.paths.config} can run, and its capabilities`,
+  );
+  const crowded = await doctored(t, {
+    runner: {
+      capabilities: Array.from({ length: 64 }, (_, at) => `c${String(at)}`),
+    },
+  });
+  assert.deepEqual(finding(crowded.findings, "capabilities"), {
+    check: "capabilities",
+    passed: false,
+    detail: `runner configuration ${crowded.paths.config}: capabilities: this runner would advertise 65 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
+  });
 });

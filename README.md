@@ -26,7 +26,9 @@ Give the token with `=`: a token can begin with `-`, which `--token <token>` wou
 
 This spends the token, declaring the platform the jobs run on, `Platform:Linux:Amd64` or `Platform:Linux:Arm64`, since Docker Desktop runs them as Linux containers, and writes the pool file chuggy answers with to `%APPDATA%\chuggy\pools\`, named for its tenant, project and pool: `vteng.chuggy.shame.json`. `--api` must be https unless it is this machine's loopback. The secret goes only into the file, which only you, SYSTEM and the Administrators may open, as everything under `%APPDATA%` is by default.
 
-A project's task can require capabilities rather than pin an image, such as `Agent:Claude` or `Tool:Unity`, and is offered only to a pool declaring every one. Declare each this machine meets with `--capability <token>`, as often as needed; a token is letters, digits, `_`, `:` and `-`, and a platform is never one, since `register` finds it. `--host` has jobs that pin no image run on this machine itself, declaring its own platform, `Platform:Windows:Amd64` or `Platform:Windows:Arm64`, beside its containers'; the pool file then says so. How a job is then met is yours: see [The image a job runs in](#the-image-a-job-runs-in).
+A project's task can require capabilities rather than pin an image, such as `Agent:Claude` or `Tool:Unity`, and is offered only to a pool advertising every one. Declare each this machine meets with `--capability <token>`, as often as needed; a token is letters, digits, `_`, `:` and `-`, and a platform is never one, since `register` finds it. `--host` has jobs that pin no image run on this machine itself, declaring its own platform, `Platform:Windows:Amd64` or `Platform:Windows:Arm64`, beside its containers'; the pool file then says so. How a job is then met is yours: see [The image a job runs in](#the-image-a-job-runs-in).
+
+From 0.3.0 the pool's service advertises on every poll what it finds when it starts, in place of what the pool was registered with: the platform its containers run, this machine's own beside it where the pool was registered with `--host`, `Agent:Claude` where an `images` entry declares it or the pool was registered with `--host`, and runner.json's `capabilities` or, where it is absent, the rest of what the pool was registered with, less any agent it has no image or host to run. So an edit to runner.json's `images` or `capabilities` takes effect when the service restarts; register again only for a new machine or pool, or to replace a registration. An earlier copy refuses a runner.json naming `capabilities`.
 
 The pool takes the computer name's first label unless `--pool <name>` names it; a name is lowercase letters, digits and hyphens. A pool is one per name in a project, so a second machine of the same name registering in the same project displaces the first: give one a `--pool`.
 
@@ -60,7 +62,8 @@ It takes no `--pool`, and the file is named for the tenant and the member. A mem
   "environment": {},
   "network": "chuggy-jobs",
   "imageUnusedSecsMax": 604800,
-  "diskFreeGibMin": 20
+  "diskFreeGibMin": 20,
+  "memoryFreeGibMin": 0
 }
 ```
 
@@ -76,15 +79,17 @@ It takes no `--pool`, and the file is named for the tenant and the member. A mem
 | `network`         | no       | The bridge network jobs join, made if missing. Default `chuggy-jobs`; never `host`.                          |
 | `engineSocket`    | no       | `true` hands each job Docker Desktop's engine, below. Default `false`.                                       |
 | `images`          | no       | The images a job that pins none runs in, below. Default none.                                                |
+| `capabilities`    | no       | What this machine meets beside its platforms and `Agent:Claude`, which each pool's service advertises in place of what `--capability` declared; never a platform, each once; 0.3.0 or later. Where it is absent, each advertises the rest of what its pool was registered with. |
 | `imageUnusedSecsMax` | no    | How long a job's image this runner pulled may go unused before it is removed; 0 keeps them until the disk is under `diskFreeGibMin`. Default a week, 604800. |
 | `diskFreeGibMin`  | no       | The GiB kept free for what Docker Desktop holds, below; 0 keeps no floor; 0.3.0 or later. Default 20.         |
+| `memoryFreeGibMin` | no      | The GiB of Docker Desktop's VM's memory its containers leave free for the engine and the VM, below; 0.3.0 or later. Default 0, which makes all of it the budget. |
 | `dockerDiskDirectory` | no   | The directory holding Docker Desktop's disk image, `docker_data.vhdx`, where its settings moved it. Default `%LOCALAPPDATA%\Docker\wsl\disk`. |
 
 Save the token file under `%APPDATA%`, where only you may open it. Docker Desktop shows a file it mounts to every user in the container, so a job reads it as the image's user.
 
 A file is yours alone where you, SYSTEM or the Administrators own it and no one else is allowed anything by its access rules. The directories the runner keeps secrets in, the pool file's and those under `%LOCALAPPDATA%\chuggy-windows`, are held to the same: `register` spends no token, and no other command runs, where one is not, as it would not be if `APPDATA` or `LOCALAPPDATA` named a shared one. A directory not made yet is held to the one it would be made in.
 
-Each assignment's CPU and memory are checked against what Docker Desktop's VM has, not what already runs on it, so a pool's service may run `concurrencyMax` jobs and `sessionsMax` sessions at once. Docker Desktop's resource settings decide what that VM has.
+Each assignment's CPU and memory are checked against what Docker Desktop's VM has, not what already runs on it, so a pool's service may run `concurrencyMax` jobs and `sessionsMax` sessions at once; a job also starts only into the room the memory budget below leaves. Docker Desktop's resource settings decide what that VM has.
 
 A session is a project's chat or lead, run on this machine's Claude login, and comes only from a project whose administrator routes Chat or Lead to Runners. It is run as a job is, with the same token file, environment and network, but is not held to `timeoutSecsMax`: it ends once idle, and is killed at its assignment's own deadline.
 
@@ -95,6 +100,8 @@ Every job on this machine, and its agent, can then run anything Docker Desktop w
 **The disk floor** is `diskFreeGibMin`, held each pass against the lower of two: what is free on the drive holding Docker Desktop's disk image, which grows into that drive, and what is free in Docker Desktop's VM under `/mnt/docker-desktop-disk`, which Docker Desktop's disk size caps. The VM's is asked through `wsl -d docker-desktop`, and only once `/mnt/docker-desktop-disk` is a mount. Where only one can be measured, the floor is held on that one, and the service's log, `doctor` and `status` say so; where neither can, or the engine is not Docker Desktop's, no floor is held. Under it, the service removes the images it may, at most once a minute and under half of it every pass, as the hourly removal below does but keeping only the newest of chuggy's runtime and session images, and removing a job's image this runner pulled whatever `imageUnusedSecsMax` says, and takes no job until the disk is over it; sessions and jobs already running go on. Under half of it once that removal has begun, and is done or has run out its 30 s, it kills one job a pass, never a session: the one whose container and workspace hold the most, and otherwise the newest. chuggy shows that job's ticket as Disk low, waiting for you to free space on this machine and resume it. The service's log says when the disk goes under the floor and when it is over again. `doctor` and `status` say what is free against the floor.
 
 What is removed in the VM frees room in the disk image, and Docker Desktop returns it to the drive only where the image is sparse. Where the drive stays under the floor once images are gone, compact the image: stop the runner's tasks, quit Docker Desktop, `wsl --shutdown`, then diskpart's `select vdisk file=<the image>` and `compact vdisk`, or `Optimize-VHD -Path <the image> -Mode Full` where Hyper-V is installed, which Windows Home never has. A floor held on the VM alone, where the drive cannot be measured, fails `doctor`, since the drive is what fills.
+
+**The memory budget** is the memory of Docker Desktop's VM, as docker's `info` says it, less `memoryFreeGibMin`, a reserve for what the engine and the VM use outside every container; none is kept unless the file sets one. Every running container counts against it, whichever pool's service started it: a job or session a runner ran at its memory cap, and anything else, such as a database or what a job starts through `engineSocket`, at what `docker stats` says it uses. A job is started only into room. Once its image is here it is held, still this service's and shown in chuggy as starting, until the room left takes its cap; if its assignment's deadline comes too near for it to start, it fails as a job lost on its runner, which chuggy resumes by itself up to its retry limit. A held job counts at its cap on every pool's service here, as a volume named for its container with `-held`, until its container runs. No service takes a job while any job is held or starting, or while the room is under the least memory a job may ask, and held jobs start in the order they were held. A job asking more than the whole budget is refused, and chuggy shows its ticket as Nowhere to run this work. Sessions are counted but never held. The count is approximate: a container counted by its use is counted at what it used when the service last counted, use outside every container is covered only by `memoryFreeGibMin`, and jobs a pool registered with `--host` runs on this machine itself are not counted. Every pool's service of this account takes the one lock under `%LOCALAPPDATA%\chuggy-windows\run\memory` to start into the room. `status` says the room, the budget and whether the service takes jobs, and why a held job waits.
 
 ## The image a job runs in
 
@@ -126,7 +133,7 @@ A service the project's checks need, such as a database, is yours and never chug
 chuggy-windows doctor --pool $env:APPDATA\chuggy\pools\vteng.chuggy.shame.json
 ```
 
-Its first line names the copy speaking and the Node it runs under. It checks both files and who may open them, the directories the runner keeps secrets in, the token file, whether jobs are handed Docker Desktop's engine, whether the pool file's task runs this copy, the engine and what its VM has, the job network, a token from the pool's issuer and one poll of the plane, and changes nothing. The poll is a long one, so the last check can take a while.
+Its first line names the copy speaking and the Node it runs under. It checks both files and who may open them, the directories the runner keeps secrets in, the token file, whether jobs are handed Docker Desktop's engine, whether the pool file's task runs this copy, the capabilities a run advertises, the engine and what its VM has, the job network, the free disk against the floor, a token from the pool's issuer and one poll of the plane, which advertises none, and changes nothing. The poll is a long one, so the last check can take a while.
 
 ## Run as a service
 
@@ -158,7 +165,7 @@ and to start it again, `/ENABLE` then `/Run`. Ending the task ends the service, 
 | `run`               | The runner: polls until the plane denies the pool.                                                                      |
 | `service`           | What the task runs: `run`, started again after it ends unless the plane denied the pool.                                 |
 | `once`              | One poll, then waits for what it placed to start, and for a job on this machine itself to end. Holds the pool as `run` does, so each is refused while the other runs. |
-| `status`            | The runner's limits, the free disk against its floor, this pool's containers, the service's jobs on this machine itself and what it is still pulling or starting, each named a job or a session. |
+| `status`            | The runner's limits, the free disk against its floor, the room in the memory budget, this pool's containers, the service's jobs on this machine itself and what it is still pulling, starting or holding for room, each named a job or a session. |
 | `stop <assignment>` | Stops one assignment's container, through the service when it is running; a job on this machine itself only through the service. |
 | `doctor`            | The checks above.                                                                                                       |
 | `install-service`   | Registers the pool's scheduled task.                                                                                    |

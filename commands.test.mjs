@@ -13,6 +13,8 @@ import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import { heldCreateArgv } from "@chuggy/worker-core/engineArgv.mjs";
+
 import { cliMain } from "./commands.mjs";
 import { controlServed, inFlightFixture } from "./control.fixture.mjs";
 import { deferred, fakeDisk, fakeEngine } from "./engine.fixture.mjs";
@@ -56,7 +58,7 @@ import { fakeTaskScheduler } from "./taskScheduler.fixture.mjs";
  * @property {typeof globalThis.fetch} [fetch]
  * @property {import("@chuggy/worker-core/engine.mjs").Engine} [engine]
  * @property {import("@chuggy/worker-core/poolLoop.mjs").WorkerPoolClient["tokens"]} [tokens]
- * @property {import("@chuggy/worker-core/poolLoop.mjs").WorkerPoolClient["plane"]} [plane]
+ * @property {import("@chuggy/worker-core/poolLoop.mjs").WorkerPoolClient["plane"] | null} [plane] the one doctor polls, which a suite never reaches unless it sets it, and `null` for the pool's own
  * @property {import("./taskScheduler.mjs").TaskScheduler} [tasks]
  * @property {import("./runnerConfig.mjs").SharedRefusal} [sharedRefusal]
  * @property {import("./supervisor.mjs").SupervisorHost["start"]} [startRun]
@@ -130,7 +132,9 @@ async function called(argv, machine = {}) {
       }),
     engine: machine.engine ?? fakeEngine().engine,
     tokens: machine.tokens ?? deniedTokens,
-    plane: machine.plane ?? unreachedPlane,
+    ...(machine.plane === null
+      ? {}
+      : { plane: machine.plane ?? unreachedPlane }),
     disk: machine.disk ?? fakeDisk(100),
     tasks: machine.tasks ?? fakeTaskScheduler().scheduler,
     sharedRefusal: machine.sharedRefusal ?? sharedFixture().sharedRefusal,
@@ -586,13 +590,14 @@ test("once makes the job network, and a pass the plane denies ends with the deni
  * @param {import("./engine.fixture.mjs").FakeEngineState} state
  */
 function containersPlaced(state) {
-  for (const [name, labels] of [
-    ["chuggy-shame-a", { "io.chuggy.assignment": "asg-2" }],
+  for (const [name, labels, gib] of /** @type {const} */ ([
+    ["chuggy-shame-a", { "io.chuggy.assignment": "asg-2" }, 4],
     [
       "chuggy-shame-b",
       { "io.chuggy.assignment": "ses-1", "io.chuggy.kind": "Session" },
+      2,
     ],
-  ])
+  ]))
     state.containers.set(name, {
       id: `id-${name}`,
       name,
@@ -603,6 +608,7 @@ function containersPlaced(state) {
         "io.chuggy.deadline": "1800000000",
         ...labels,
       },
+      memoryBytes: gib * 2 ** 30,
     });
 }
 
@@ -624,6 +630,7 @@ test("status and stop reach this pool's service, and status names each workload'
       "service: running",
       "limits: concurrencyMax 3, sessionsMax 4",
       "disk floor: 100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB",
+      "memory: 10 GiB room · 16 GiB budget · Taking",
       `${inFlightFixture.name}  session  pulling  i  asg-1`,
       "chuggy-shame-a  job  running  deadline 2027-01-15T08:00:00.000Z  asg-2",
       "chuggy-shame-b  session  running  deadline 2027-01-15T08:00:00.000Z  ses-1",
@@ -754,9 +761,118 @@ test("status names a job what a service from before sessions answers it is placi
       "service: running",
       "limits: concurrencyMax 1, sessionsMax 2",
       "disk floor: 100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB",
+      "memory: 16 GiB room · 16 GiB budget · Taking",
       `${inFlightFixture.name}  job  pulling  i  asg-1`,
     ].join("\n"),
   );
+});
+
+test("status names a job held for room and what it waits for, and the memory it waits on", async (t) => {
+  const fixture = await machined(t);
+  const { poolFile, machine } = fixture;
+  await heldBy(t, fixture, fixturePool, {
+    inFlight: [
+      {
+        ...inFlightFixture,
+        kind: "Job",
+        phase: "Held",
+        memoryMib: 8192,
+        waiting: "needs 8 GiB, room 8 GiB",
+      },
+    ],
+  });
+  const { engine, state } = fakeEngine();
+  state.containers.set("chuggy-jobs-postgres", {
+    id: "id-postgres",
+    name: "chuggy-jobs-postgres",
+    labels: {},
+    status: "running",
+    image: "postgres",
+    usedBytes: 8 * 2 ** 30,
+  });
+  await engine.exec(
+    heldCreateArgv({
+      name: `${inFlightFixture.name}-held`,
+      pool: "vteng/chuggy/shame",
+      assignment: inFlightFixture.assignment,
+      memoryMib: 8192,
+      heldMs: 1,
+      pid: process.pid,
+      untilMs: Date.now() + 3_600_000,
+      starting: false,
+    }),
+  );
+  const status = await called(["status", "--pool", poolFile], {
+    ...machine,
+    engine,
+  });
+  assert.deepEqual(status.out.split("\n").slice(3), [
+    "memory: 0 GiB room · 16 GiB budget · Held",
+    `${inFlightFixture.name}  job  held  i  asg-1  waiting: needs 8 GiB, room 8 GiB`,
+  ]);
+});
+
+/**
+ * Catches a run that advertises nothing, or what its pool file recorded in
+ * place of what its machine and its file are, and a doctor whose poll
+ * changes what the pool advertises.
+ */
+test("a run advertises its capabilities on each poll, and doctor's poll advertises none", async (t) => {
+  /** @type {(string | null)[]} */
+  const advertised = [];
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (/** @type {string} */ _url, /** @type {RequestInit} */ init) => {
+      advertised.push(
+        new globalThis.Headers(init.headers).get("chuggy-capabilities"),
+      );
+      return globalThis.Response.json({
+        assignments: [],
+        sessions: [],
+        stop: [],
+      });
+    },
+  );
+  const { poolFile, machine } = await machined(t, {
+    pool: {
+      ...fixturePool,
+      capabilities: ["Platform:Linux:Amd64", "container"],
+      host: true,
+    },
+    runner: { capabilities: ["gpu"] },
+  });
+  let acquired = 0;
+  const { status } = await called(["run", "--pool", poolFile], {
+    ...machine,
+    arch: "arm64",
+    fetch: globalThis.fetch,
+    tokens: {
+      acquire: async () =>
+        (acquired += 1) <= 2
+          ? { acquired: "Token", token: "pool-token" }
+          : deniedTokens.acquire(),
+      invalidate: () => undefined,
+    },
+  });
+  assert.equal(status, deniedExitStatus);
+  assert.deepEqual(
+    advertised,
+    Array(2).fill(
+      "Platform:Linux:Arm64,Platform:Windows:Arm64,gpu,Agent:Claude",
+    ),
+  );
+  advertised.length = 0;
+  const doctor = await called(["doctor", "--pool", poolFile], {
+    ...machine,
+    tokens: ready.tokens,
+    plane: null,
+  });
+  assert.match(
+    doctor.out,
+    /^ok {4}capabilities: a run advertises Platform:Linux:Amd64, Platform:Windows:Amd64, gpu, Agent:Claude on each poll: /mu,
+  );
+  assert.deepEqual(advertised, [null]);
 });
 
 test("a run makes the job network, answers on the pool's pipe while it runs and ends with the denial's status", async (t) => {

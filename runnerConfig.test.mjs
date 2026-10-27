@@ -43,6 +43,7 @@ const defaults = {
   images: [],
   imageUnusedSecsMax: 604800,
   diskFreeGibMin: 20,
+  memoryFreeGibMin: 0,
 };
 
 /** A file no one else may open. */
@@ -107,12 +108,13 @@ test("sessionsMax is a whole number of none or more, read apart from concurrency
   }
 });
 
-test("the disk floor and an image's retention are whole numbers of none or more, and Docker Desktop's disk image is found where the file says", async (t) => {
+test("the disk floor, an image's retention and the memory kept free are whole numbers of none or more, and Docker Desktop's disk image is found where the file says", async (t) => {
   const directory = await scratch(t);
   const named = {
     ...minimal,
     diskFreeGibMin: 0,
     imageUnusedSecsMax: 0,
+    memoryFreeGibMin: 3,
     dockerDiskDirectory: "D:\\DockerDesktopWSL\\disk",
   };
   assert.deepEqual(
@@ -134,6 +136,8 @@ test("the disk floor and an image's retention are whole numbers of none or more,
       "Invalid input: expected number, received string",
     ],
     ["dockerDiskDirectory", "Docker\\wsl\\disk", "must be an absolute path"],
+    ["memoryFreeGibMin", -1, "Too small: expected number to be >=0"],
+    ["memoryFreeGibMin", 1.5, "Invalid input: expected int, received number"],
   ]) {
     const file = await written(directory, { ...minimal, [key]: value });
     await assert.rejects(runnerConfig(file, ownerOnly), {
@@ -399,4 +403,32 @@ test("engineSocket hands every job Docker Desktop's engine where it is true, and
     ownerOnly,
   );
   assert.equal(off.engineSocket, false);
+});
+
+test("a file may declare what its machine meets, read as written, and a platform or a token named twice is refused, naming where", async (t) => {
+  const directory = await scratch(t);
+  const file = await written(directory, {
+    ...minimal,
+    capabilities: ["gpu", "Agent:Claude"],
+  });
+  assert.deepEqual((await runnerConfig(file, ownerOnly)).capabilities, [
+    "gpu",
+    "Agent:Claude",
+  ]);
+  for (const [capabilities, why] of [
+    [
+      ["gpu", "Platform:Windows:Amd64"],
+      /capabilities\.1 is a platform, which the runner finds of this machine/u,
+    ],
+    [["gpu", "gpu"], /capabilities\.1 is named by an earlier entry/u],
+    [["no spaces"], /capabilities\.0 /u],
+  ])
+    await assert.rejects(
+      runnerConfig(
+        await written(directory, { ...minimal, capabilities }),
+        ownerOnly,
+      ),
+      why,
+      JSON.stringify(capabilities),
+    );
 });

@@ -29,7 +29,9 @@ import {
   runnerDirectoriesChecked,
   runnerSecretDirectories,
   runnerLeftoversRemoved,
+  runnerCapabilities,
   runnerLoop,
+  runnerMemoryLock,
   runnerParts,
   runnerSetup,
   scratchRemovedOnEnd,
@@ -42,6 +44,7 @@ import {
   usersReadAcl,
   usersRefusal,
   hostedPool,
+  poolFileWritten,
 } from "./runner.fixture.mjs";
 import { runnerPaths } from "./runnerConfig.mjs";
 import { deniedExitStatus } from "./serviceTask.mjs";
@@ -1294,4 +1297,203 @@ test("a run of a pool registered with --host refuses a runner's file no host job
     runner: { environment: { userprofile: "C:\\elsewhere" } },
   });
   assert.deepEqual(runner.backend.inFlight(), []);
+});
+
+/**
+ * Catches a run advertising a platform its pool file names in place of what
+ * this machine runs, no Windows platform for a pool registered with
+ * `--host`, an agent it has no image or host to run, a capability twice, or
+ * what the pool was registered with beside what its own file declares.
+ */
+test("a run advertises the platforms it runs, the agents its file can run, and what its file declares or else the rest of what its pool was registered with, each once", async (t) => {
+  /**
+   * @param {Parameters<typeof runnerFixture>[1]} documents
+   * @param {string} [arch]
+   */
+  const advertised = async (documents, arch = "x64") => {
+    const fixture = await runnerFixture(t, documents);
+    return runnerCapabilities(
+      await runnerSetup(
+        fixture.poolFile,
+        fixture.environment,
+        fixture.home,
+        fixture.sharedRefusal,
+      ),
+      arch,
+    );
+  };
+  const registered = {
+    ...fixturePool,
+    capabilities: ["Platform:Linux:Amd64", "container", "container"],
+  };
+  const withClaude = {
+    ...registered,
+    capabilities: [...registered.capabilities, "Agent:Claude"],
+  };
+  const claudeImages = [
+    { image: "registry.example/claude", capabilities: ["Agent:Claude"] },
+  ];
+  for (const [documents, arch, capabilities] of [
+    [{}, "x64", ["Platform:Linux:Amd64", "container"]],
+    [{ pool: withClaude }, "x64", ["Platform:Linux:Amd64", "container"]],
+    [
+      { pool: withClaude, runner: { images: claudeImages } },
+      "arm64",
+      ["Platform:Linux:Arm64", "container", "Agent:Claude"],
+    ],
+    [
+      { pool: { ...withClaude, host: true } },
+      "x64",
+      [
+        "Platform:Linux:Amd64",
+        "Platform:Windows:Amd64",
+        "container",
+        "Agent:Claude",
+      ],
+    ],
+    [
+      { pool: { ...registered, host: true } },
+      "arm64",
+      [
+        "Platform:Linux:Arm64",
+        "Platform:Windows:Arm64",
+        "container",
+        "Agent:Claude",
+      ],
+    ],
+    [
+      { pool: withClaude, runner: { capabilities: ["gpu", "Agent:Claude"] } },
+      "x64",
+      ["Platform:Linux:Amd64", "gpu", "Agent:Claude"],
+    ],
+  ])
+    assert.deepEqual(
+      await advertised(
+        /** @type {Parameters<typeof runnerFixture>[1]} */ (documents),
+        /** @type {string} */ (arch),
+      ),
+      capabilities,
+      JSON.stringify(documents),
+    );
+});
+
+test("a run is refused on a machine no pool runs on, and where it would advertise more than a pool may, naming the runner's file, while one that places nothing is not", async (t) => {
+  const fixture = await runnerFixture(t, {
+    runner: {
+      capabilities: Array.from({ length: 64 }, (_, at) => `c${String(at)}`),
+    },
+  });
+  const setup = await runnerSetup(
+    fixture.poolFile,
+    fixture.environment,
+    fixture.home,
+    fixture.sharedRefusal,
+  );
+  assert.throws(
+    () => runnerCapabilities(setup, "x64"),
+    new Error(
+      `runner configuration ${setup.paths.config}: capabilities: this runner would advertise 65 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
+    ),
+  );
+  const host = {
+    log: () => undefined,
+    sharedRefusal: fixture.sharedRefusal,
+    engine: fakeEngine().engine,
+    disk: fakeDisk(100),
+  };
+  await assert.rejects(
+    runnerParts(setup, host),
+    /^Error: runner configuration .*: capabilities: this runner would advertise 65 /u,
+  );
+  await runnerParts(setup, { ...host, places: false, arch: "ia32" });
+  const fitting = { ...setup, config: { ...setup.config, capabilities: [] } };
+  assert.throws(
+    () => runnerCapabilities(fitting, "ia32"),
+    new Error("this machine is ia32, and a pool runs Linux on x64 or arm64"),
+  );
+});
+
+test("every pool's service of this account takes one memory lock, in the runner's runtime directory", async (t) => {
+  const { paths } = await runnerFixture(t);
+  assert.equal(
+    runnerMemoryLock(paths),
+    "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\run\\memory\\docker.lock",
+  );
+});
+
+test("a run's memory budget is Docker Desktop's memory less the GiB its file keeps free, none unless it says, and it takes no job without room", async (t) => {
+  for (const [memoryFreeGibMin, usedGib, taken] of /** @type {const} */ ([
+    [undefined, 15.5, true],
+    [undefined, 15.6, false],
+    [4, 11.6, false],
+    [2, 13.5, true],
+  ])) {
+    const label = `${String(memoryFreeGibMin)} with ${String(usedGib)} used`;
+    const { runner, state } = await composed(t, {
+      runner: memoryFreeGibMin === undefined ? {} : { memoryFreeGibMin },
+    });
+    state.containers.set("chuggy-jobs-postgres", {
+      id: "id-postgres",
+      name: "chuggy-jobs-postgres",
+      labels: {},
+      status: "running",
+      image: "postgres",
+      usedBytes: usedGib * 2 ** 30,
+    });
+    await runner.client.backend.held();
+    assert.equal(runner.client.backend.jobsTaken?.(), taken, label);
+  }
+});
+
+test("every pool's service of this account starts its jobs under the one memory lock", async (t) => {
+  const pool = { ...fixturePool, registryHost: "registry.chuggy.example" };
+  const fixture = await runnerFixture(t, { pool });
+  const otherFile = await poolFileWritten(
+    win32.join(fixture.home, "other.json"),
+    { ...pool, pool: "other" },
+  );
+  const lock = runnerMemoryLock(fixture.paths);
+  const { engine } = fakeEngine();
+  /** @type {boolean[]} */
+  const lockedAtHold = [];
+  const watched = {
+    ...engine,
+    /** @type {typeof engine.exec} */
+    exec: (argv, options) => {
+      if (
+        argv[0] === "volume" &&
+        argv[1] === "create" &&
+        argv.some((arg) => arg.startsWith("io.chuggy.held="))
+      )
+        lockedAtHold.push(existsSync(lock));
+      return engine.exec(argv, options);
+    },
+  };
+  for (const [file, assignment] of /** @type {const} */ ([
+    [fixture.poolFile, "asg-1"],
+    [otherFile, "asg-2"],
+  ])) {
+    const runner = await runnerParts(
+      await runnerSetup(
+        file,
+        fixture.environment,
+        fixture.home,
+        fixture.sharedRefusal,
+      ),
+      {
+        log: () => undefined,
+        sharedRefusal: fixture.sharedRefusal,
+        engine: watched,
+        disk: fakeDisk(100),
+        tokens: pooledTokens,
+      },
+    );
+    await runner.client.backend.held();
+    await runner.backend.place(
+      runnerAssignment(assignment, registryImage),
+      "Job",
+    );
+    await runner.backend.settled();
+  }
+  assert.deepEqual(lockedAtHold, [true, true]);
 });
