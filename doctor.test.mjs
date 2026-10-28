@@ -6,8 +6,11 @@ import test from "node:test";
 import { hostTimeoutSecsMax } from "@chuggy/worker-core/hostBackend.mjs";
 
 import { doctorFindings, findingLine } from "./doctor.mjs";
+import { poolProjectDigest } from "@chuggy/worker-core/poolIdentity.mjs";
+
 import { fakeDisk, fakeEngine } from "./engine.fixture.mjs";
 import {
+  fixturePool,
   fixtureUserSid,
   poolFileWritten,
   runnerFixture,
@@ -154,6 +157,20 @@ const finding = (findings, check) =>
 const advertisedFrom = (paths) =>
   `a run advertises Platform:Linux:Amd64, container on each poll: the platforms it runs, the agents ${paths.config} can run, and the rest of what the pool was registered with`;
 
+/** What doctor finds of the fixture's issuer and plane, each answering. */
+const planeFound = [
+  {
+    check: "pool token",
+    passed: true,
+    detail: "issued by https://issuer.chuggy.example/oauth2/token",
+  },
+  {
+    check: "plane",
+    passed: true,
+    detail: "https://chuggy.example/pool answered a poll",
+  },
+];
+
 /** What the disk floor finds of a fake disk with 100 GiB free everywhere. */
 const diskOver =
   "100 GiB free at C:\\, holding Docker Desktop's disk image, over the floor of 20 GiB";
@@ -200,17 +217,9 @@ test("a machine ready to run passes every check, and doctor changes nothing", as
       passed: true,
       detail: "chuggy-jobs is missing, and a run makes it",
     },
+    { check: "volumes", passed: true, detail: "none" },
     { check: "disk floor", passed: true, detail: diskOver },
-    {
-      check: "pool token",
-      passed: true,
-      detail: "issued by https://issuer.chuggy.example/oauth2/token",
-    },
-    {
-      check: "plane",
-      passed: true,
-      detail: "https://chuggy.example/pool answered a poll",
-    },
+    ...planeFound,
   ]);
   assert.deepEqual(polls, [["pool-token", [], 0, 0]]);
   for (const directory of [paths.runtime, paths.logs, paths.jobs])
@@ -750,4 +759,92 @@ test("a pool registered with --host advertises this machine's platform beside it
     passed: false,
     detail: `runner configuration ${crowded.paths.config}: capabilities: this runner would advertise 65 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
   });
+});
+
+const projectMount = {
+  source: "sccache",
+  target: "/cache/sccache",
+  scope: "project",
+};
+const projectVolume = `sccache-${String(poolProjectDigest(fixturePool))}`;
+
+/**
+ * The labels of a volume a runner made as a project's.
+ *
+ * @param {string} project
+ */
+const projectLabels = (project) => ({
+  "io.chuggy.owner-volume": "",
+  "io.chuggy.owner-volume.project": project,
+});
+
+test("doctor finds each named volume a job mounts, one listed as its project's by its name for the pool's project, there labelled as that project's or for the first job to make", async (t) => {
+  for (const [volumes, detail] of [
+    [new Map([["cargo", {}]]), "cargo at /cache/cargo, read-only, present"],
+    [
+      new Map([[projectVolume, projectLabels("vteng/chuggy")]]),
+      `${projectVolume} at /cache/sccache, vteng/chuggy's alone, present`,
+    ],
+    [
+      new Map(),
+      `${projectVolume} at /cache/sccache, vteng/chuggy's alone, missing until the first job started through chuggy's runtime makes it`,
+    ],
+  ]) {
+    const unscoped = volumes.has("cargo");
+    const { findings } = await doctored(t, {
+      runner: {
+        volumes: [
+          unscoped
+            ? { source: "cargo", target: "/cache/cargo", readonly: true }
+            : projectMount,
+        ],
+      },
+      engine: (state) => {
+        state.volumes = volumes;
+      },
+    });
+    assert.deepEqual(finding(findings, "volumes"), {
+      check: "volumes",
+      passed: true,
+      detail,
+    });
+  }
+});
+
+test("doctor fails a volume another project's label marks where it is listed as its project's, and names a personal runner's as each job's own without looking for it", async (t) => {
+  const foreign = await doctored(t, {
+    runner: { volumes: [projectMount] },
+    engine: (state) => {
+      state.volumes.set(projectVolume, projectLabels("vteng/other"));
+    },
+  });
+  assert.deepEqual(finding(foreign.findings, "volumes"), {
+    check: "volumes",
+    passed: false,
+    detail: `${projectVolume} is labelled as vteng/other's, not vteng/chuggy's`,
+  });
+  const personal = await doctored(t, {
+    pool: {
+      kind: "Personal",
+      tenant: "vteng",
+      owner: "28:https://auth.chuggy.example/0f3c9a52-member",
+      capabilities: ["container"],
+      tokenUrl: "https://issuer.chuggy.example/oauth2/token",
+      audience: "https://chuggy.example",
+      planeUrl: "https://chuggy.example/pool",
+      clientId: "personal-client",
+      clientSecret: "personal-client-secret",
+    },
+    runner: { volumes: [projectMount] },
+  });
+  assert.deepEqual(finding(personal.findings, "volumes"), {
+    check: "volumes",
+    passed: true,
+    detail:
+      "sccache is scoped per project: each job mounts its own project's, which, where it is missing, the first job in that project started through chuggy's runtime makes",
+  });
+  assert.deepEqual(
+    personal.state.calls.filter(({ argv }) => argv[0] === "volume"),
+    [],
+  );
 });

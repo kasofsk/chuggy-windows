@@ -11,6 +11,7 @@ import test from "node:test";
 
 import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { claudeCredentialVariable } from "@chuggy/worker-core/claudeCredential.mjs";
+import { poolProjectDigest } from "@chuggy/worker-core/poolIdentity.mjs";
 import { workerPoolClientPass } from "@chuggy/worker-core/poolLoop.mjs";
 import { runtimeScratch } from "@chuggy/worker-core/runtimeScratch.mjs";
 
@@ -636,10 +637,12 @@ test("a pull of the pool's registry is made at the endpoint Docker Desktop's con
  *
  * @param {import("node:test").TestContext} t
  * @param {Record<string, unknown>} [runner]
+ * @param {(state: import("./engine.fixture.mjs").FakeEngineState) => void} [configure] what the engine holds beforehand
  */
-async function jobAndSessionRuns(t, runner = {}) {
+async function jobAndSessionRuns(t, runner = {}, configure = () => undefined) {
   const composition = await composed(t, { runner });
   composition.state.images.add(registryImage);
+  configure(composition.state);
   const { backend } = composition.runner;
   await backend.place(runnerAssignment("asg-1", registryImage), "Job");
   await backend.place(runnerAssignment("asg-2", registryImage), "Session");
@@ -1527,4 +1530,33 @@ test("every pool's service of this account starts its jobs under the one memory 
     await runner.backend.settled();
   }
   assert.deepEqual(lockedAtHold, [true, true]);
+});
+
+test("a run whose file lists named volumes mounts each into a job uncopied, its project's by the job's project, and none into a session", async (t) => {
+  const sccache = `sccache-${String(poolProjectDigest(fixturePool))}`;
+  const listed = await jobAndSessionRuns(
+    t,
+    {
+      volumes: [
+        { source: "cargo", target: "/cache/cargo" },
+        { source: "sccache", target: "/cache/sccache", scope: "project" },
+      ],
+    },
+    (state) => {
+      state.volumes.set("cargo", {});
+      state.volumes.set(sccache, {
+        "io.chuggy.owner-volume": "",
+        "io.chuggy.owner-volume.project": "vteng/chuggy",
+      });
+    },
+  );
+  const mounts = (/** @type {string[]} */ argv) =>
+    argv.filter(
+      (flag, at) => argv[at - 1] === "--volume" && flag.includes(":/cache/"),
+    );
+  assert.deepEqual(mounts(listed.job.argv), [
+    "cargo:/cache/cargo:nocopy",
+    `${sccache}:/cache/sccache:nocopy`,
+  ]);
+  assert.deepEqual(mounts(listed.session.argv), []);
 });

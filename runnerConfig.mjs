@@ -13,7 +13,11 @@ import { win32 } from "node:path";
 
 import { z } from "zod";
 
-import { ownerImagesSchema } from "@chuggy/worker-core/containerBackend.mjs";
+import {
+  ownerImagesSchema,
+  ownerVolumesSchema,
+} from "@chuggy/worker-core/containerBackend.mjs";
+import { ownerVolumeDirectory } from "@chuggy/worker-core/engineArgv.mjs";
 import { imageUnusedSecsMaxDefault } from "@chuggy/worker-core/imageCleanup.mjs";
 import { registerDeclaredSchema } from "@chuggy/worker-core/register.mjs";
 import {
@@ -111,6 +115,26 @@ export const runnerConfigSchema = z
      * owner declares it meets: the first meeting every one the job names.
      */
     images: ownerImagesSchema.default([]),
+    /**
+     * The named volumes of Docker Desktop mounted into every job, each field
+     * but `scope` named as `--mount` names it. One whose `scope` is "project"
+     * is one per project. A directory of this machine is refused: its path
+     * is Windows', which a job's mount would need Docker Desktop to share and
+     * translate, and who may write it is its access rules, not a job's uid.
+     */
+    volumes: ownerVolumesSchema
+      .superRefine((volumes, context) => {
+        volumes.forEach(({ source }, index) => {
+          if (ownerVolumeDirectory(source) || win32.isAbsolute(source))
+            context.addIssue({
+              code: "custom",
+              path: [index, "source"],
+              message:
+                "is a directory of this machine, and a Windows runner mounts only named volumes",
+            });
+        });
+      })
+      .default([]),
     /**
      * What this machine meets beside its platforms and the agents the file
      * can run, which each pool's service advertises in place of what

@@ -342,6 +342,7 @@ export async function runnerParts(setup, host) {
       machine,
       pullRetryMs,
       images: config.images,
+      volumes: config.volumes,
       ...(engineSocket === undefined ? {} : { engineSocket }),
       imageRecord: win32.join(paths.images, `${config.engine}.json`),
       imageUnusedSecsMax: config.imageUnusedSecsMax,

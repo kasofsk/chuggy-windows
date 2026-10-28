@@ -10,6 +10,8 @@
 import { stat } from "node:fs/promises";
 import { win32 } from "node:path";
 
+import { z } from "zod";
+
 import {
   hostEnvironmentRefusal,
   hostPlatformsDeclared,
@@ -18,8 +20,14 @@ import {
 import { poolCredentials } from "@chuggy/worker-core/poolCredentials.mjs";
 
 import {
+  ownerVolumeLabelsRefusal,
+  ownerVolumeProjectsLine,
+  ownerVolumesServed,
+} from "@chuggy/worker-core/containerBackend.mjs";
+import {
   listArgv,
   networkInspectArgv,
+  volumeInspectArgv,
 } from "@chuggy/worker-core/engineArgv.mjs";
 import {
   engineFailure,
@@ -168,6 +176,79 @@ function failureMessage(failure) {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
+/** What docker answers an inspection of volumes with, of each one's labels. */
+const inspectedVolumeLabelsSchema = z.array(
+  z.object({ Labels: z.record(z.string(), z.string()).nullish() }),
+);
+
+/**
+ * What a job is given of one of its owner's named volumes, or a throw naming
+ * why it cannot be given it: there and labelled as the one listed, or for
+ * the first job to make.
+ *
+ * @param {Engine} engine
+ * @param {import("@chuggy/worker-core/engineArgv.mjs").OwnerVolume} volume
+ */
+async function ownerVolumeFound(engine, volume) {
+  const { source, target, readonly, project } = volume;
+  const mounted = `${source} at ${target}${readonly ? ", read-only" : ""}${project === undefined ? "" : `, ${project}'s alone`}`;
+  const inspected = await engine.exec(volumeInspectArgv([source]));
+  if (inspected.code === 0) {
+    let labels;
+    try {
+      const [found] = inspectedVolumeLabelsSchema.parse(
+        JSON.parse(inspected.stdout),
+      );
+      labels = found?.Labels ?? {};
+    } catch {
+      throw new Error(
+        `docker answered an inspection of ${source} doctor cannot read`,
+      );
+    }
+    const refusal = ownerVolumeLabelsRefusal(volume, labels);
+    if (refusal !== undefined) throw new Error(`${source} ${refusal}`);
+    return `${mounted}, present`;
+  }
+  if (engineFailure(inspected) === "NoSuchVolume")
+    return `${mounted}, missing until the first job started through chuggy's runtime makes it`;
+  throw new Error(`${source}: ${engineFailureLine(inspected)}`);
+}
+
+/**
+ * What each job is given of its owner's volumes. On a personal runner one
+ * scoped per project is each job's own project's, so it is named as such and
+ * not looked for: the runner serves its member across projects, and doctor
+ * holds no job's project to look under.
+ *
+ * @param {Engine} engine
+ * @param {PoolCredentials} credentials
+ * @param {RunnerConfig} config
+ * @returns {Promise<DoctorFinding>}
+ */
+async function ownerVolumesFinding(engine, credentials, config) {
+  const check = "volumes";
+  const { served, withheld } = ownerVolumesServed(config.volumes, credentials);
+  const scoped = withheld.map(ownerVolumeProjectsLine);
+  /** @type {string[]} */
+  const found = [];
+  try {
+    for (const volume of served)
+      found.push(await ownerVolumeFound(engine, volume));
+  } catch (failure) {
+    return {
+      check,
+      passed: false,
+      detail: [failureMessage(failure), ...scoped].join("; "),
+    };
+  }
+  found.push(...scoped);
+  return {
+    check,
+    passed: true,
+    detail: found.length === 0 ? "none" : found.join("; "),
+  };
+}
+
 /**
  * The free disk against the floor the runner's file sets, warned of where
  * any place could not be measured or it is under the floor, and failed where
@@ -225,6 +306,7 @@ async function engineChecks(engine, credentials, config, input, findings) {
       return [true, `${config.network} is missing, and a run makes it`];
     throw new Error(engineFailureLine(inspected));
   });
+  findings.push(await ownerVolumesFinding(engine, credentials, config));
   findings.push(await diskFloorFinding(engine, config, input));
 }
 

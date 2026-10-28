@@ -41,6 +41,7 @@ const defaults = {
   network: "chuggy-jobs",
   engineSocket: false,
   images: [],
+  volumes: [],
   imageUnusedSecsMax: 604800,
   diskFreeGibMin: 20,
   memoryFreeGibMin: 0,
@@ -439,4 +440,37 @@ test("a file may declare what its machine meets, read as written, and a platform
       why,
       JSON.stringify(capabilities),
     );
+});
+
+test("the named volumes a job mounts are read as listed, and a directory of this machine is refused, naming the volume", async (t) => {
+  const directory = await scratch(t);
+  const volumes = [
+    { source: "sccache", target: "/cache/sccache", scope: "project" },
+    { source: "cargo", target: "/cache/cargo", readonly: true },
+  ];
+  assert.deepEqual(
+    (
+      await runnerConfig(
+        await written(directory, { ...minimal, volumes }),
+        ownerOnly,
+      )
+    ).volumes,
+    [{ ...volumes[0], readonly: false }, { ...volumes[1] }],
+  );
+  for (const source of ["C:\\cache", "/srv/cache"]) {
+    const file = await written(directory, {
+      ...minimal,
+      volumes: [{ source, target: "/cache/shared" }],
+    });
+    await assert.rejects(
+      runnerConfig(file, ownerOnly),
+      /volumes\.0\.source is a directory of this machine, and a Windows runner mounts only named volumes/u,
+      source,
+    );
+  }
+  const chuggy = await written(directory, {
+    ...minimal,
+    volumes: [{ source: "cargo", target: "/workspace/cache" }],
+  });
+  await assert.rejects(runnerConfig(chuggy, ownerOnly), /volumes\.0\.target /u);
 });
