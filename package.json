@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.21.0/chuggy-worker-contract-1.21.0.tgz",
-    "@chuggy/worker-core": "git+file:///Users/apple/eanna/chuggy/chuggy-common#b5fafd75117e2f7aedf8e13ae2820834d78e1c12",
+    "@chuggy/worker-core": "github:Valensta/chuggy-common#b5fafd75117e2f7aedf8e13ae2820834d78e1c12",
     "zod": "4.5.4"
   },
   "bundleDependencies": [
