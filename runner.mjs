@@ -58,8 +58,8 @@ import {
 } from "./diskFree.mjs";
 import { memoryFreeBytes, memoryReservedBytes } from "./memoryFree.mjs";
 import {
-  claudeTokenFileRefusal,
-  runnerClaudeCredential,
+  credentialFileRefusal,
+  runnerCredentialsHanded,
   runnerConfig,
   runnerPaths,
 } from "./runnerConfig.mjs";
@@ -181,19 +181,31 @@ export function runnerClaimLock(paths) {
 }
 
 /**
- * What the container backend is told of Docker Desktop's memory: the budget
- * the runner's file keeps and reserves, and the two locks every pool's
- * service of this account shares.
+ * The lock a service takes to get and copy chuggy's runtime, so a pull for one
+ * platform does not replace the variant another of this account's services is
+ * copying from: one for every pool's service of this account.
+ *
+ * @param {RunnerPaths} paths
+ */
+export function runnerRuntimeLock(paths) {
+  return win32.join(paths.runtime, "runtime", "docker.lock");
+}
+
+/**
+ * What the container backend is told of what every pool's service of this
+ * account shares of Docker Desktop: the memory budget the runner's file keeps
+ * and reserves, and the memory, claim and runtime locks.
  *
  * @param {RunnerConfig} config
  * @param {RunnerPaths} paths
  */
-function runnerMemorySettings(config, paths) {
+export function runnerEngineSettings(config, paths) {
   return {
     memoryFreeBytesMin: memoryFreeBytes(config),
     memoryReservedBytes: memoryReservedBytes(config),
     memoryLock: runnerMemoryLock(paths),
     memoryClaimLock: runnerClaimLock(paths),
+    runtimeLock: runnerRuntimeLock(paths),
   };
 }
 
@@ -217,7 +229,7 @@ export function runnerCapabilities(setup, arch) {
   const hosted = host ? hostPlatform(arch) : undefined;
   const advertised = registerAdvertised({
     platforms: [found.platform, ...(hosted === undefined ? [] : [hosted])],
-    files: { tokenFile: config.claudeTokenFile },
+    files: runnerCredentialsHanded(config),
     images: config.images,
     host,
     declared: config.capabilities,
@@ -329,8 +341,7 @@ export async function runnerParts(setup, host) {
     {
       engine: config.engine,
       pool: credentials,
-      tokenFile: config.claudeTokenFile,
-      claudeCredential: runnerClaudeCredential,
+      ...runnerCredentialsHanded(config),
       registryHost: credentials.registryHost,
       dockerHost,
       timeoutSecsMax: config.timeoutSecsMax,
@@ -347,7 +358,7 @@ export async function runnerParts(setup, host) {
       imageRecord: win32.join(paths.images, `${config.engine}.json`),
       imageUnusedSecsMax: config.imageUnusedSecsMax,
       diskFreeBytesMin: diskFloorBytes(config),
-      ...runnerMemorySettings(config, paths),
+      ...runnerEngineSettings(config, paths),
     },
     {
       engine,
@@ -355,8 +366,8 @@ export async function runnerParts(setup, host) {
       nowMs: Date.now,
       sleep: (ms, signal) => delay(ms, undefined, { signal }),
       log: host.log,
-      tokenFileRefusal: (file) =>
-        claudeTokenFileRefusal(file, host.sharedRefusal),
+      tokenFileRefusal: (file, agent) =>
+        credentialFileRefusal(file, host.sharedRefusal, agent),
       diskFree: diskFreeLogged(
         () => engineDiskFree(config, paths, engine, disk),
         host.log,
@@ -498,8 +509,7 @@ function runnerHostRouted(setup, container, host) {
         platforms,
         directory: win32.join(paths.jobs, poolIdentityDigest(credentials)),
         logDir: paths.logs,
-        tokenFile: config.claudeTokenFile,
-        claudeCredential: runnerClaudeCredential,
+        ...runnerCredentialsHanded(config),
         timeoutSecsMax: config.timeoutSecsMax,
         outputBytesMax: config.outputBytesMax,
         environment: config.environment,
@@ -511,8 +521,8 @@ function runnerHostRouted(setup, container, host) {
       },
       {
         log: host.log,
-        tokenFileRefusal: (file) =>
-          claudeTokenFileRefusal(file, host.sharedRefusal),
+        tokenFileRefusal: (file, agent) =>
+          credentialFileRefusal(file, host.sharedRefusal, agent),
         spawn: host.spawn ?? hostJobSpawned,
         kill: (pid) => hostJobTreeKilled(pid),
         atExit: (onExit) => process.once("exit", onExit),

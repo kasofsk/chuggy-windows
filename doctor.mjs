@@ -7,7 +7,7 @@
  * or releasing a lease or changing what the pool advertised.
  */
 
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { win32 } from "node:path";
 
 import { z } from "zod";
@@ -39,7 +39,9 @@ import {
 } from "@chuggy/worker-core/poolIdentity.mjs";
 import { diskFloorSaid } from "./diskFree.mjs";
 import {
-  claudeTokenFileRefusal,
+  credentialFileRefusal,
+  runnerCodexAgent,
+  runnerCredentialDescribed,
   runnerConfig,
   runnerConfigLimits,
 } from "./runnerConfig.mjs";
@@ -457,6 +459,84 @@ function capabilitiesFinding(input, credentials, config) {
   };
 }
 
+/** What a job requiring Codex names, which brings it the Codex credential. */
+const codexCapability = `Agent:${runnerCodexAgent}`;
+
+/**
+ * Why the Codex auth file is not one Codex reads, or nothing: as only doctor
+ * reads it, as a JSON object, never naming what it holds or what a parser
+ * said of it.
+ *
+ * @param {string} file
+ */
+async function codexAuthRefusal(file) {
+  const { label, remedy } = runnerCredentialDescribed(runnerCodexAgent);
+  let document;
+  try {
+    document = JSON.parse(
+      (await readFile(file, "utf8")).replace(/^\ufeff/u, ""),
+    );
+  } catch {
+    document = undefined;
+  }
+  return typeof document === "object" &&
+    document !== null &&
+    !Array.isArray(document)
+    ? undefined
+    : `the ${label} ${file} is not a JSON object; ${remedy}`;
+}
+
+/**
+ * The Codex credential the runner's file names, held to the rule a run holds
+ * it to and then read as a JSON object, and whether this pool advertises
+ * `Agent:Codex`, which is what brings a job its file; or nothing where the
+ * file names none and this pool advertises no Codex.
+ *
+ * @param {DoctorInput} input
+ * @param {PoolCredentials} credentials
+ * @param {RunnerConfig} config
+ * @returns {Promise<DoctorFinding | undefined>}
+ */
+async function codexCredentialFinding(input, credentials, config) {
+  const check = "Codex credential";
+  let advertised = /** @type {string[]} */ ([]);
+  try {
+    advertised = runnerCapabilities(
+      { credentials, config, paths: input.paths },
+      input.arch,
+    );
+  } catch {
+    // The capabilities check says why; this one judges the file alone.
+  }
+  const codex = advertised.includes(codexCapability);
+  if (config.codexCredential === undefined)
+    return codex
+      ? {
+          check,
+          passed: true,
+          warning: true,
+          detail: `this pool advertises ${codexCapability} and ${input.paths.config} names no codexCredential, so its Codex jobs are handed the Claude token file; add codexCredential to hand them a Codex auth.json`,
+        }
+      : undefined;
+  const file = config.codexCredential.authFile;
+  const refusal =
+    (await credentialFileRefusal(
+      file,
+      input.sharedRefusal,
+      runnerCodexAgent,
+    )) ?? (await codexAuthRefusal(file));
+  if (refusal !== undefined) return { check, passed: false, detail: refusal };
+  const detail = `the Codex auth file ${file}, this account's own`;
+  return codex
+    ? { check, passed: true, detail }
+    : {
+        check,
+        passed: true,
+        warning: true,
+        detail: `${detail}; this pool does not advertise ${codexCapability}, since no images entry declares it and it was not registered with --host, so no job requiring ${codexCapability} reaches it`,
+      };
+}
+
 /** @param {DoctorFinding} finding */
 export function findingLine(finding) {
   const label =
@@ -487,13 +567,17 @@ export async function doctorFindings(input) {
   findings.push(await directoriesFinding(input));
   if (config !== undefined)
     await checked(findings, "Claude token file", async () => {
-      const refusal = await claudeTokenFileRefusal(
+      const refusal = await credentialFileRefusal(
         config.claudeTokenFile,
         input.sharedRefusal,
       );
       if (refusal !== undefined) throw new Error(refusal);
       return [true, `${config.claudeTokenFile}, this account's own`];
     });
+  if (credentials !== undefined && config !== undefined) {
+    const codex = await codexCredentialFinding(input, credentials, config);
+    if (codex !== undefined) findings.push(codex);
+  }
   if (credentials?.host === true && config !== undefined)
     findings.push(hostJobsFinding(credentials, config));
   findings.push(await serviceTaskFinding(input));

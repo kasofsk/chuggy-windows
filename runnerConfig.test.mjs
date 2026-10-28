@@ -13,7 +13,7 @@ import {
 } from "./runner.fixture.mjs";
 import {
   bindMountNameable,
-  claudeTokenFileRefusal,
+  credentialFileRefusal,
   runnerConfig,
   runnerConfigLimits,
   runnerPaths,
@@ -331,7 +331,7 @@ test("a Claude token file a job cannot be handed is refused, and one only this a
   const { acls, asked, sharedRefusal } = sharedFixture();
   /** @param {string} path */
   const refusal = async (path) =>
-    (await claudeTokenFileRefusal(path, sharedRefusal)) ?? "";
+    (await credentialFileRefusal(path, sharedRefusal)) ?? "";
   assert.equal(
     await refusal(file),
     `the Claude token file ${file} cannot be found; save \`claude setup-token\`'s output there`,
@@ -344,7 +344,7 @@ test("a Claude token file a job cannot be handed is refused, and one only this a
   );
   assert.deepEqual(asked, []);
   await writeFile(file, "claude-token-fixture");
-  assert.equal(await claudeTokenFileRefusal(file, sharedRefusal), undefined);
+  assert.equal(await credentialFileRefusal(file, sharedRefusal), undefined);
   acls.set(file, usersReadAcl);
   assert.equal(
     await refusal(file),
@@ -473,4 +473,33 @@ test("the named volumes a job mounts are read as listed, and a directory of this
     volumes: [{ source: "cargo", target: "/workspace/cache" }],
   });
   await assert.rejects(runnerConfig(chuggy, ownerOnly), /volumes\.0\.target /u);
+});
+
+test("a Codex credential is the auth.json codex login writes, at a Windows absolute path a bind mount can name, and its refusal names it as one", async (t) => {
+  const directory = await scratch(t);
+  const authFile = "C:\\Users\\op\\.codex\\auth.json";
+  assert.deepEqual(
+    (
+      await runnerConfig(
+        await written(directory, { ...minimal, codexCredential: { authFile } }),
+        ownerOnly,
+      )
+    ).codexCredential,
+    { authFile },
+  );
+  for (const [codexCredential, why] of [
+    [
+      { authFile: "auth.json" },
+      /codexCredential\.authFile must be an absolute path/u,
+    ],
+    [{ authFile, kind: "ApiKey" }, /codexCredential /u],
+  ]) {
+    const file = await written(directory, { ...minimal, codexCredential });
+    await assert.rejects(runnerConfig(file, ownerOnly), why);
+  }
+  const missing = join(directory, "auth.json");
+  assert.equal(
+    await credentialFileRefusal(missing, ownerOnly, "Codex"),
+    `the Codex auth file ${missing} cannot be found; run codex login, which writes it to %USERPROFILE%\\.codex\\auth.json`,
+  );
 });

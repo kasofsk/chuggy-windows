@@ -33,6 +33,7 @@ import {
   runnerCapabilities,
   runnerLoop,
   runnerClaimLock,
+  runnerEngineSettings,
   runnerMemoryLock,
   runnerParts,
   runnerSetup,
@@ -1559,4 +1560,81 @@ test("a run whose file lists named volumes mounts each into a job uncopied, its 
     `${sccache}:/cache/sccache:nocopy`,
   ]);
   assert.deepEqual(mounts(listed.session.argv), []);
+});
+
+test("a job requiring Agent:Codex is handed the Codex auth file the runner's file names, and every other job the Claude token file, and either is refused while anyone else may open it", async (t) => {
+  const codexFile = "C:\\Users\\op\\.codex\\auth.json";
+  const { runner, state, tokenFile, acls } = await composed(t, {
+    runner: { codexCredential: { authFile: codexFile } },
+  });
+  await writeFile(codexFile, '{"tokens":{}}');
+  state.images.add(registryImage);
+  const codexJob = {
+    ...runnerAssignment("asg-1", registryImage),
+    capabilities: ["container", "Agent:Codex"],
+  };
+  await runner.backend.place(codexJob, "Job");
+  await runner.backend.place(runnerAssignment("asg-2", registryImage), "Job");
+  await runner.backend.settled();
+  const sources = state.calls
+    .filter((call) => call.argv[0] === "run")
+    .map((call) =>
+      call.argv.find((flag) =>
+        flag.endsWith(
+          ",target=/var/run/chuggy/credentials/claude-code,readonly",
+        ),
+      ),
+    );
+  assert.deepEqual(sources, [
+    `type=bind,source=${codexFile},target=/var/run/chuggy/credentials/claude-code,readonly`,
+    `type=bind,source=${tokenFile},target=/var/run/chuggy/credentials/claude-code,readonly`,
+  ]);
+  acls.set(codexFile, usersReadAcl);
+  assert.deepEqual(
+    await runner.backend.place({ ...codexJob, assignment: "asg-3" }, "Job"),
+    {
+      placed: "Refused",
+      evidence: `the Codex auth file ${codexFile} ${usersRefusal}`,
+    },
+  );
+});
+
+test("a run advertises Agent:Codex where it names a Codex credential and an images entry declares the agent, and every pool's service shares one runtime lock", async (t) => {
+  const codexImages = [
+    {
+      image: "registry.example/agents",
+      capabilities: ["Agent:Claude", "Agent:Codex"],
+    },
+  ];
+  const fixture = await runnerFixture(t, {
+    runner: {
+      images: codexImages,
+      codexCredential: { authFile: "C:\\Users\\op\\.codex\\auth.json" },
+    },
+  });
+  const setup = await runnerSetup(
+    fixture.poolFile,
+    fixture.environment,
+    fixture.home,
+    fixture.sharedRefusal,
+  );
+  assert.deepEqual(runnerCapabilities(setup, "x64"), [
+    "Platform:Linux:Amd64",
+    "container",
+    "Agent:Claude",
+    "Agent:Codex",
+  ]);
+  const unnamed = {
+    ...setup,
+    config: { ...setup.config, codexCredential: undefined },
+  };
+  assert.deepEqual(runnerCapabilities(unnamed, "x64"), [
+    "Platform:Linux:Amd64",
+    "container",
+    "Agent:Claude",
+  ]);
+  assert.equal(
+    runnerEngineSettings(setup.config, setup.paths).runtimeLock,
+    "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\run\\runtime\\docker.lock",
+  );
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { win32 } from "node:path";
 import test from "node:test";
 
@@ -41,6 +41,7 @@ const taskName = "\\chuggy-windows\\pool";
  * @property {import("./diskFree.mjs").DiskFreePorts} [disk] what the free disk is measured by, 100 GiB free everywhere where none
  * @property {(poolFile: string) => string} [task] the definition of the task of the pool file's name, where there is one
  * @property {readonly string[]} [alsoMade] other directories made, by path
+ * @property {Record<string, string>} [files] other files written, by path, with their text
  * @property {readonly ("pool" | "runtime" | "logs" | "jobs")[]} [made] which of the runner's directories are made: the pool file's, the runtime directory, the logs and the host jobs'
  * @property {(acls: Map<string, import("./windowsAcl.mjs").Acl>, files: {poolFile: string, config: string, tokenFile: string, pool: string, runtime: string, logs: string, jobs: string}) => void} [shared] who else may open which file
  */
@@ -108,6 +109,8 @@ async function doctored(t, options = {}) {
     ...(options.alsoMade ?? []),
   ])
     await mkdir(made, { recursive: true });
+  for (const [path, text] of Object.entries(options.files ?? {}))
+    await writeFile(path, text);
   options.shared?.(fixture.acls, {
     poolFile,
     config: fixture.paths.config,
@@ -847,4 +850,60 @@ test("doctor fails a volume another project's label marks where it is listed as 
     personal.state.calls.filter(({ argv }) => argv[0] === "volume"),
     [],
   );
+});
+
+test("doctor holds the Codex credential to the rule a run does and reads it as a JSON object, and warns where this pool would not reach Codex jobs, or reaches them with the Claude token file", async (t) => {
+  const authFile = "C:\\Users\\op\\.codex\\auth.json";
+  const images = [
+    { image: "registry.example/agents", capabilities: ["Agent:Codex"] },
+  ];
+  /**
+   * @param {Record<string, unknown>} runner
+   * @param {string} [text] the auth file's, none where it is not there
+   */
+  const codexFound = async (runner, text) =>
+    finding(
+      (
+        await doctored(t, {
+          runner,
+          files: text === undefined ? {} : { [authFile]: text },
+        })
+      ).findings,
+      "Codex credential",
+    );
+  const named = { codexCredential: { authFile }, images };
+  const remedy =
+    "run codex login, which writes it to %USERPROFILE%\\.codex\\auth.json";
+  const check = "Codex credential";
+  assert.deepEqual(await codexFound(named), {
+    check,
+    passed: false,
+    detail: `the Codex auth file ${authFile} cannot be found; ${remedy}`,
+  });
+  assert.deepEqual(await codexFound(named, "[1]"), {
+    check,
+    passed: false,
+    detail: `the Codex auth file ${authFile} is not a JSON object; ${remedy}`,
+  });
+  assert.deepEqual(await codexFound(named, '{"tokens":{}}'), {
+    check,
+    passed: true,
+    detail: `the Codex auth file ${authFile}, this account's own`,
+  });
+  assert.deepEqual(await codexFound({ codexCredential: { authFile } }, "{}"), {
+    check,
+    passed: true,
+    warning: true,
+    detail: `the Codex auth file ${authFile}, this account's own; this pool does not advertise Agent:Codex, since no images entry declares it and it was not registered with --host, so no job requiring Agent:Codex reaches it`,
+  });
+  assert.equal(await codexFound({ images }), undefined);
+  const declared = await doctored(t, {
+    runner: { capabilities: ["Agent:Codex"] },
+  });
+  assert.deepEqual(finding(declared.findings, check), {
+    check,
+    passed: true,
+    warning: true,
+    detail: `this pool advertises Agent:Codex and ${declared.paths.config} names no codexCredential, so its Codex jobs are handed the Claude token file; add codexCredential to hand them a Codex auth.json`,
+  });
 });

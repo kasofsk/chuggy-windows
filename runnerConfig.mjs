@@ -4,6 +4,10 @@
  * is read strictly, so a misspelt key is an error rather than a default. The
  * pool's credentials are the worker core's to read.
  *
+ * THE FILE NAMES THE CLAUDE TOKEN FILE, and may name another agent's
+ * credential beside it, which a job requiring that agent is handed in its
+ * place: Codex's by `codexCredential`.
+ *
  * Every path is a Windows path, built with `path.win32`, so the suites hold
  * them on any machine.
  */
@@ -83,6 +87,16 @@ const environmentSchema = z
         });
   });
 
+/** A credential's file, which a job is handed by a bind mount. */
+const credentialFileSchema = z
+  .string()
+  .refine((file) => win32.isAbsolute(file), {
+    error: "must be an absolute path",
+  })
+  .refine((file) => bindMountNameable(file), {
+    error: "cannot be named in a bind mount",
+  });
+
 export const runnerConfigSchema = z
   .strictObject({
     /** Docker Desktop's: podman on Windows is only ever a remote client. */
@@ -93,14 +107,11 @@ export const runnerConfigSchema = z
     /** The sessions held beside the jobs, none where it is 0. */
     sessionsMax: z.number().int().nonnegative().safe().default(2),
     /** Where `claude setup-token`'s output was saved, named in a bind mount. */
-    claudeTokenFile: z
-      .string()
-      .refine((file) => win32.isAbsolute(file), {
-        error: "must be an absolute path",
-      })
-      .refine((file) => bindMountNameable(file), {
-        error: "cannot be named in a bind mount",
-      }),
+    claudeTokenFile: credentialFileSchema,
+    /** The `auth.json` `codex login` writes, which a job requiring `Agent:Codex` is handed. */
+    codexCredential: z
+      .strictObject({ authFile: credentialFileSchema })
+      .optional(),
     timeoutSecsMax: positiveSchema,
     outputBytesMax: positiveSchema,
     environment: environmentSchema.default({}),
@@ -198,6 +209,60 @@ export const runnerConfigSchema = z
  */
 export const runnerClaudeCredential = { kind: "Subscription" };
 
+/** The agent `codexCredential` is the credential of, as an `Agent:` capability names it. */
+export const runnerCodexAgent = "Codex";
+
+/**
+ * How a refusal names each agent's credential file, and what its owner does
+ * to make one.
+ *
+ * @type {Record<string, {label: string, remedy: string}>}
+ */
+const credentialsDescribed = {
+  Claude: {
+    label: "Claude token file",
+    remedy: "save `claude setup-token`'s output there",
+  },
+  [runnerCodexAgent]: {
+    label: "Codex auth file",
+    remedy:
+      "run codex login, which writes it to %USERPROFILE%\\.codex\\auth.json",
+  },
+};
+
+/**
+ * How a refusal names an agent's credential file: Codex's as its auth file,
+ * and any other as the Claude token file, which a job is handed where the
+ * runner holds no file of its agent.
+ *
+ * @param {string} agent
+ */
+export function runnerCredentialDescribed(agent) {
+  return credentialsDescribed[
+    agent === runnerCodexAgent ? runnerCodexAgent : "Claude"
+  ];
+}
+
+/**
+ * What the backends are handed of the runner's credentials: the Claude token
+ * file and the setting that names its kind, which every run names so that the
+ * core withholds what would choose another, and the file of each other agent
+ * the runner's file names a credential for, by that agent's name.
+ *
+ * @param {RunnerConfig} config
+ * @returns {{tokenFile: string, claudeCredential: import("@chuggy/worker-core/claudeCredential.mjs").ClaudeCredentialSetting, agentCredentialFiles: Record<string, string>}}
+ */
+export function runnerCredentialsHanded(config) {
+  return {
+    tokenFile: config.claudeTokenFile,
+    claudeCredential: runnerClaudeCredential,
+    agentCredentialFiles:
+      config.codexCredential === undefined
+        ? {}
+        : { [runnerCodexAgent]: config.codexCredential.authFile },
+  };
+}
+
 /**
  * How many jobs and sessions each pool's service holds at once, in the file's
  * own terms.
@@ -293,26 +358,28 @@ export async function runnerConfig(file, sharedRefusal) {
 }
 
 /**
- * Why this runner cannot hand its jobs the Claude token file, or nothing. The
+ * Why this runner cannot hand its jobs a credential's file, or nothing. The
  * file is its owner's alone; Docker Desktop shows a file it mounts to every
  * user in the container, so the job's user reads it. Only the file's metadata
- * and access rules are read: the token reaches the job by mount and never
- * this process.
+ * and access rules are read: the credential reaches the job by mount and
+ * never this process.
  *
  * @param {string} file
  * @param {SharedRefusal} sharedRefusal
+ * @param {string} [agent] whose credential the file is, Claude's where none
  * @returns {Promise<string | undefined>}
  */
-export async function claudeTokenFileRefusal(file, sharedRefusal) {
+export async function credentialFileRefusal(file, sharedRefusal, agent = "") {
+  const { label, remedy } = runnerCredentialDescribed(agent);
   let stats;
   try {
     stats = await stat(file);
   } catch {
-    return `the Claude token file ${file} cannot be found; save \`claude setup-token\`'s output there`;
+    return `the ${label} ${file} cannot be found; ${remedy}`;
   }
-  if (!stats.isFile()) return `the Claude token file ${file} is not a file`;
-  if (stats.size === 0) return `the Claude token file ${file} is empty`;
+  if (!stats.isFile()) return `the ${label} ${file} is not a file`;
+  if (stats.size === 0) return `the ${label} ${file} is empty`;
   const shared = await sharedRefusal(file);
-  if (shared !== undefined) return `the Claude token file ${file} ${shared}`;
+  if (shared !== undefined) return `the ${label} ${file} ${shared}`;
   return undefined;
 }
