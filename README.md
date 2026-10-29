@@ -83,6 +83,7 @@ It takes no `--pool`, and the file is named for the tenant and the member. A mem
 | `images`          | no       | The images a job that pins none runs in, below. Default none.                                                |
 | `capabilities` | no | What this machine meets beyond its platforms and the agents found for it, which each pool's service advertises in place of what `--capability` declared; an agent named here is advertised whether or not an `images` entry declares it; never a platform, each once; 0.3.0 or later. Where it is absent, each advertises the rest of what its pool was registered with. |
 | `volumes` | no | Named volumes of Docker Desktop mounted into every job and never a session, below; 0.5.0 or later. Default none. |
+| `reportMetrics` | no | `true` has each pool's service report its work and this machine's name, CPUs, memory and free disk against the floor to chuggy, whose Grafana shows them; Windows keeps no load average, so none is reported; 0.7.0 or later. Default `false`. |
 | `imageUnusedSecsMax` | no    | How long a job's image this runner pulled may go unused before it is removed; 0 keeps them until the disk is under `diskFreeGibMin`. Default a week, 604800. |
 | `diskFreeGibMin`  | no       | The GiB kept free for what Docker Desktop holds, below; 0 keeps no floor; 0.3.0 or later. Default 20.         |
 | `memoryFreeGibMin` | no      | The GiB of Docker Desktop's VM's memory its containers leave free for the engine and the VM, below; 0.3.0 or later. Default 0, which makes all of it the budget. |

@@ -179,6 +179,8 @@ export const runnerConfigSchema = z
      * whole budget. None is reserved where it is 0.
      */
     memoryReservedGib: nonnegativeSchema.max(freeGibMax).default(0),
+    /** Whether each pool's service sends chuggy a report of how it and this machine are doing. */
+    reportMetrics: z.boolean().default(false),
     /**
      * The directory holding Docker Desktop's disk image, `docker_data.vhdx`,
      * where its settings moved it; the drive it is on is measured.

@@ -9,7 +9,12 @@ import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import {
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
 import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
+import { workerRunnerReportRoute } from "@chuggy/worker-contract/workerPool";
 import { claudeCredentialVariable } from "@chuggy/worker-core/claudeCredential.mjs";
 import { poolProjectDigest } from "@chuggy/worker-core/poolIdentity.mjs";
 import { workerPoolClientPass } from "@chuggy/worker-core/poolLoop.mjs";
@@ -1638,3 +1643,100 @@ test("a run advertises Agent:Codex where it names a Codex credential and an imag
     "C:\\Users\\op\\AppData\\Local\\chuggy-windows\\run\\runtime\\docker.lock",
   );
 });
+
+/**
+ * A pool plane on the global fetch that takes reports, answering each poll
+ * with nothing to do under this contract's release, with the reports it took.
+ *
+ * @param {import("node:test").TestContext} t
+ */
+function reportingPlane(t) {
+  const plane = {
+    /** @type {Record<string, unknown>[]} */
+    reports: [],
+    /** @type {() => void} */
+    reported: () => undefined,
+  };
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (/** @type {string} */ url, /** @type {RequestInit} */ init) => {
+      if (!String(url).endsWith(workerRunnerReportRoute))
+        return globalThis.Response.json(
+          { assignments: [], sessions: [], stop: [] },
+          { headers: { [workerContractHeader]: workerContractRelease } },
+        );
+      plane.reports.push(JSON.parse(String(init.body)));
+      plane.reported();
+      return new globalThis.Response(null, { status: 204 });
+    },
+  );
+  return plane;
+}
+
+/**
+ * Catches a runner that reports where its owner has not opted in, and one
+ * whose file's key never reaches the core or whose report names none of this
+ * machine.
+ */
+test(
+  "a run reports on itself to a plane that takes reports only where its file sets reportMetrics, naming this machine's facts",
+  { timeout: 30_000 },
+  async (t) => {
+    const plane = reportingPlane(t);
+    const facts = {
+      cpus: () => 4,
+      memoryTotal: () => 16 * 2 ** 30,
+      memoryAvailable: () => 8 * 2 ** 30,
+    };
+    /** @param {Record<string, unknown>} runner */
+    const reporting = async (runner) => {
+      const { runner: parts } = await composed(
+        t,
+        { runner },
+        { tokens: pooledTokens, facts },
+      );
+      const client =
+        /** @type {import("@chuggy/worker-core/poolRunner.mjs").PoolRunnerClient} */ (
+          parts.client
+        );
+      t.after(() => client.reporting?.ended());
+      return { client, backend: parts.backend };
+    };
+    for (const runner of [{}, { reportMetrics: false }]) {
+      const { client, backend } = await reporting(runner);
+      assert.equal((await workerPoolClientPass(client)).passed, "Reconciled");
+      await backend.settled();
+      assert.equal(client.reporting, undefined, JSON.stringify(runner));
+      assert.deepEqual(plane.reports, [], JSON.stringify(runner));
+    }
+    const { client } = await reporting({ reportMetrics: true });
+    const sent = new Promise((resolve) => {
+      plane.reported = () => resolve(undefined);
+    });
+    assert.equal((await workerPoolClientPass(client)).passed, "Reconciled");
+    await sent;
+    assert.equal(plane.reports.length, 1);
+    const [report] = plane.reports;
+    assert.deepEqual(
+      {
+        cpus: report.cpus,
+        loadAverageOneMinute: report.loadAverageOneMinute,
+        memoryTotalBytes: report.memoryTotalBytes,
+        memoryAvailableBytes: report.memoryAvailableBytes,
+        diskFreeBytes: report.diskFreeBytes,
+        diskFloorBytes: report.diskFloorBytes,
+        polls: report.polls,
+      },
+      {
+        cpus: 4,
+        loadAverageOneMinute: undefined,
+        memoryTotalBytes: 16 * 2 ** 30,
+        memoryAvailableBytes: 8 * 2 ** 30,
+        diskFreeBytes: 100 * 2 ** 30,
+        diskFloorBytes: 20 * 2 ** 30,
+        polls: 1,
+      },
+    );
+  },
+);

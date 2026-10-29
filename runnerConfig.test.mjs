@@ -46,6 +46,7 @@ const defaults = {
   diskFreeGibMin: 20,
   memoryFreeGibMin: 0,
   memoryReservedGib: 0,
+  reportMetrics: false,
 };
 
 /** A file no one else may open. */
@@ -502,4 +503,27 @@ test("a Codex credential is the auth.json codex login writes, at a Windows absol
     await credentialFileRefusal(missing, ownerOnly, "Codex"),
     `the Codex auth file ${missing} cannot be found; run codex login, which writes it to %USERPROFILE%\\.codex\\auth.json`,
   );
+});
+
+test("the runner reports on itself only where its file turns that on", async (t) => {
+  const directory = await scratch(t);
+  for (const reportMetrics of [true, false])
+    assert.equal(
+      (
+        await runnerConfig(
+          await written(directory, { ...minimal, reportMetrics }),
+          ownerOnly,
+        )
+      ).reportMetrics,
+      reportMetrics,
+    );
+  for (const reportMetrics of ["true", 1, null]) {
+    const file = await written(directory, { ...minimal, reportMetrics });
+    await assert.rejects(runnerConfig(file, ownerOnly), {
+      message: new RegExp(
+        `^runner configuration .*: reportMetrics Invalid input: expected boolean`,
+        "u",
+      ),
+    });
+  }
 });
