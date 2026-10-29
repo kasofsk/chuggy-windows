@@ -13,6 +13,11 @@ import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import {
+  chatHostControl,
+  chatHostStatusAsked,
+} from "@chuggy/worker-core/chatHost.mjs";
+import { controlServer } from "@chuggy/worker-core/control.mjs";
 import { heldCreateArgv } from "@chuggy/worker-core/engineArgv.mjs";
 
 import { cliMain } from "./commands.mjs";
@@ -25,6 +30,7 @@ import {
 } from "./poolService.mjs";
 import {
   answeringFetch,
+  registeredChatHostFixture,
   registeredFixture,
   registeredPersonalFixture,
 } from "./register.fixture.mjs";
@@ -38,6 +44,7 @@ import {
   runnerFixture,
   sharedFixture,
   signalsWatched,
+  tokenAloneWritten,
   usersReadAcl,
   usersRefusal,
 } from "./runner.fixture.mjs";
@@ -694,14 +701,15 @@ test("status and stop believe no record whose lock is not held, stop reaching th
 });
 
 /**
- * The pool held by process `holderPid`, whose pipe drops every ask, beside an
- * engine holding the placed containers.
+ * `identity`'s pool held by process `holderPid`, whose pipe drops every ask,
+ * beside an engine holding the placed containers.
  *
  * @param {import("node:test").TestContext} t
- * @param {Awaited<ReturnType<typeof machined>>} fixture
+ * @param {Pick<Awaited<ReturnType<typeof machined>>, "paths" | "locks">} fixture
+ * @param {import("@chuggy/worker-core/poolIdentity.mjs").PoolIdentity} [identity]
  */
-async function heldUnasked(t, { paths, locks }) {
-  const runtime = poolRuntimeDirectory(paths, fixturePool);
+async function heldUnasked(t, { paths, locks }, identity = fixturePool) {
+  const runtime = poolRuntimeDirectory(paths, identity);
   await mkdir(runtime, { recursive: true });
   const hold = await poolServiceClaimed(
     runtime,
@@ -1501,7 +1509,7 @@ test("a token beginning with a dash is taken as --token=<token>, as usage says, 
   assert.deepEqual(requests, []);
   assert.match(
     (await called(["help"])).out,
-    /^ {7}chuggy-windows register --api <origin> --token=<token> \[--pool <name> \| --personal\]\n {31}\[--host\] \[--capability <token>\]\.\.\.$/mu,
+    /^ {7}chuggy-windows register --api <origin> --token=<token>\n {31}\[--pool <name> \| --personal \| --chat\]\n {31}\[--host\] \[--capability <token>\]\.\.\.$/mu,
   );
 });
 
@@ -1830,4 +1838,284 @@ test("doctor tells a pool registered with --host that its imageless jobs run on 
     out,
     /^ok {4}host jobs: a job that pins no image and names this machine's platform runs on the machine itself, as this account, unisolated$/mu,
   );
+});
+
+/** The base a chat host's file and task are named by: its tenant and member, then `chat` and `host`. */
+const chatHostBase =
+  "newtenant.28_3ahttps_3a_2f_2fauth_2echuggy_2eexample_2f0f3c9a52-member.chat.host";
+
+/** The session image the plane names a chat host. */
+const chatImage = "registry.example/chat:1";
+
+/**
+ * A machine a member's chat host runs on: its Claude token file alone in a
+ * directory of its own, and the chat host's file at `poolFile`.
+ *
+ * @param {import("node:test").TestContext} t
+ */
+async function chatMachine(t) {
+  const fixture = await machined(t, {
+    pool: registeredChatHostFixture,
+    runner: { claudeTokenFile: "C:\\Users\\op\\claude\\token" },
+  });
+  const tokenFile = await tokenAloneWritten(fixture.home);
+  const runtime = poolRuntimeDirectory(
+    fixture.paths,
+    /** @type {any} */ (registeredChatHostFixture),
+  );
+  return { ...fixture, tokenFile, runtime };
+}
+
+/** An issuer and a plane naming the session image, and an engine holding it. */
+function chatReady() {
+  const { engine, state } = fakeEngine();
+  state.images.add(chatImage);
+  return {
+    engine,
+    state,
+    ...ready,
+    plane: {
+      ...ready.plane,
+      poll: async () => ({
+        polled: /** @type {const} */ ("Reconciled"),
+        assignments: [],
+        stop: [],
+        chatImage,
+      }),
+    },
+  };
+}
+
+test("a chat host's run holds it as a pool's run does, answers what it says of itself on its pipe, and ends with the denial's status, having started no supervisor", async (t) => {
+  const { poolFile, runtime, machine, locks } = await chatMachine(t);
+  const { engine, state } = fakeEngine();
+  /** @type {unknown[]} */
+  const asked = [];
+  const tokens = {
+    acquire: async () => {
+      const { pipe } = JSON.parse(
+        await readFile(win32.join(runtime, "control.json"), "utf8"),
+      );
+      asked.push(await chatHostStatusAsked(pipe));
+      asked.push(await poolServiceAsked(pipe, { op: "stop", assignment: "a" }));
+      return deniedTokens.acquire();
+    },
+    invalidate: () => undefined,
+  };
+  const { status, out, err } = await called(["run", "--pool", poolFile], {
+    ...machine,
+    engine,
+    tokens,
+  });
+  assert.equal(status, deniedExitStatus, err);
+  assert.equal(
+    out,
+    [
+      "made the job network chuggy-jobs",
+      "the plane denied this chat host: the pool was revoked",
+    ].join("\n"),
+  );
+  assert.deepEqual(asked, [
+    { supervisor: "Absent", starting: false },
+    { refused: "a chat host's sessions are stopped in chuggy" },
+  ]);
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+  await assert.rejects(stat(win32.join(runtime, "control.json")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual([...locks.held], []);
+});
+
+test("a second run of a chat host is refused while another holds it", async (t) => {
+  const fixture = await chatMachine(t);
+  await heldBy(t, fixture, /** @type {any} */ (registeredChatHostFixture));
+  const { status, err } = await called(
+    ["run", "--pool", fixture.poolFile],
+    fixture.machine,
+  );
+  assert.equal(status, 1);
+  assert.equal(err, heldLine);
+});
+
+test("a chat host's run is refused where its Claude token file shares its directory, or anyone else may open it", async (t) => {
+  const { home, poolFile, tokenFile, acls, machine } = await chatMachine(t);
+  await tokenAloneWritten(home, ["notes.txt"]);
+  const beside = await called(["run", "--pool", poolFile], machine);
+  assert.equal(beside.status, 1);
+  assert.equal(
+    beside.err,
+    `C:\\Users\\op\\claude holds notes.txt beside the credential ${tokenFile}, and a chat host's supervisor is handed the directory whole; keep the credential in a directory of its own`,
+  );
+  acls.set(tokenFile, usersReadAcl);
+  const shared = await called(["run", "--pool", poolFile], machine);
+  assert.equal(shared.status, 1);
+  assert.equal(
+    shared.err,
+    `the Claude token file ${tokenFile} ${usersRefusal}`,
+  );
+});
+
+test("once and stop are refused of a chat host's file", async (t) => {
+  const { poolFile, machine } = await chatMachine(t);
+  const once = await called(["once", "--pool", poolFile], machine);
+  assert.equal(once.status, 2);
+  assert.equal(
+    once.err,
+    "a chat host runs only as its service; start it with chuggy-windows run, which its task runs",
+  );
+  const stop = await called(["stop", "asg-1", "--pool", poolFile], machine);
+  assert.equal(stop.status, 2);
+  assert.equal(stop.err, "a chat host's sessions are stopped in chuggy");
+});
+
+/** What status says of a chat host's settings where its file sets none. */
+const chatSettingsLine =
+  "chat: sessionsMax 4, sessionMemoryMib 2048, the supervisor's cap asked of the engine 8192 MiB, idleSecs 600, outputBytesMax 65536, running the image chuggy names";
+
+test("status of a chat host says its settings, and its supervisor where its service holds it, through the pipe its record names", async (t) => {
+  const { poolFile, runtime, machine, locks } = await chatMachine(t);
+  const stopped = await called(["status", "--pool", poolFile], machine);
+  assert.equal(stopped.status, 0, stopped.err);
+  assert.equal(
+    stopped.out,
+    ["service: not running", chatSettingsLine].join("\n"),
+  );
+  await mkdir(runtime, { recursive: true });
+  const hold = await poolServiceClaimed(
+    runtime,
+    holderPid,
+    "run",
+    locks.locking,
+  );
+  const server = await controlServer(
+    hold.pipe,
+    chatHostControl(
+      /** @type {any} */ ({
+        status: () => ({
+          named: "registry.example/chat:2",
+          used: chatImage,
+          supervisor: "Draining",
+          starting: true,
+        }),
+      }),
+    ),
+  );
+  t.after(() => server.close());
+  const running = await called(["status", "--pool", poolFile], machine);
+  assert.equal(
+    running.out,
+    [
+      "service: running",
+      chatSettingsLine,
+      "supervisor: draining, starting",
+      `image: running ${chatImage}; chuggy names registry.example/chat:2`,
+    ].join("\n"),
+  );
+  locks.held.clear();
+  const unheld = await called(["status", "--pool", poolFile], machine);
+  assert.equal(unheld.out.split("\n")[0], "service: not running");
+});
+
+test("status of a chat host says what holds it could not be asked where it drops the ask", async (t) => {
+  const fixture = await chatMachine(t);
+  const { poolFile, machine } = fixture;
+  await heldUnasked(t, fixture, /** @type {any} */ (registeredChatHostFixture));
+  const { status, out } = await called(["status", "--pool", poolFile], machine);
+  assert.equal(status, 0);
+  assert.match(
+    out,
+    /^service: holds the chat host, but could not be asked: .+\nchat: /u,
+  );
+});
+
+test("register --chat redeems a member's chat host token for its file, named for its tenant and member, declaring nothing, and starts its own task once every check passes", async (t) => {
+  const { paths, tasks, machine } = await chatMachine(t);
+  const { fetch, requests } = answeringFetch(201, registeredChatHostFixture);
+  const { status, out, err } = await called([...registerArgv, "--chat"], {
+    ...machine,
+    fetch,
+    ...chatReady(),
+  });
+  assert.equal(status, 0, err);
+  const file = join(paths.pools, `${chatHostBase}.json`);
+  const name = `\\chuggy-windows\\${chatHostBase}`;
+  assert.equal(out, `wrote ${file}; its service is running: started ${name}`);
+  assert.equal(err, checking(file));
+  assert.equal(
+    requests[0].url,
+    "https://chuggy.example/api/v1/personal-runner-registrations",
+  );
+  assert.deepEqual(JSON.parse(String(requests[0].init.body)), {
+    token: "registration-token-fixture",
+    capabilities: [],
+  });
+  assert.deepEqual(
+    JSON.parse(await readFile(file, "utf8")),
+    registeredChatHostFixture,
+  );
+  assert.equal(
+    tasks.tasks.get(name),
+    serviceTask(
+      { node: copyNode, cli: copyCli, poolFile: file },
+      fixtureUserSid,
+    ),
+  );
+  assert.ok(!`${out}${err}`.includes(registeredChatHostFixture.clientSecret));
+});
+
+test("register --chat again restarts the chat host's task, and where the restart fails says chuggy denies the chat host's earlier registration", async (t) => {
+  const { paths, tasks, machine } = await chatMachine(t);
+  const name = `\\chuggy-windows\\${chatHostBase}`;
+  const file = join(paths.pools, `${chatHostBase}.json`);
+  const registered = () =>
+    called([...registerArgv, "--chat"], {
+      ...machine,
+      fetch: answeringFetch(201, registeredChatHostFixture).fetch,
+      ...chatReady(),
+    });
+  assert.equal((await registered()).status, 0);
+  assert.equal(
+    (await registered()).out,
+    `replaced ${file}; its service is running: restarted ${name}`,
+  );
+  tasks.failing[`schtasks /Run /TN ${name}`] = {
+    stderr: "ERROR: The task is disabled.\r\n",
+  };
+  const failed = await registered();
+  assert.equal(failed.status, 0);
+  assert.equal(
+    failed.out,
+    [
+      `replaced ${file}; its service is not running, since chuggy denies the chat host's earlier registration and schtasks /Run /TN ${name} failed; next:`,
+      `  schtasks /Run /TN ${name}`,
+    ].join("\n"),
+  );
+});
+
+test("register --chat beside --personal, --pool, --host or --capability is refused before a token is spent, and --chat is register's alone", async (t) => {
+  const { machine } = await chatMachine(t);
+  for (const [extra, why] of /** @type {const} */ ([
+    [
+      ["--personal"],
+      /^--chat registers a chat host and --personal a personal runner/u,
+    ],
+    [["--pool", "shame"], /^--pool names a pool, and a chat host names none/u],
+    [["--host"], /^a chat host takes sessions alone and declares nothing/u],
+    [
+      ["--capability", "gpu"],
+      /^a chat host takes sessions alone and declares nothing/u,
+    ],
+  ])) {
+    const { fetch, requests } = answeringFetch(201, registeredChatHostFixture);
+    const { status, err } = await called(
+      [...registerArgv, "--chat", ...extra],
+      { ...machine, fetch },
+    );
+    assert.equal(status, 2, extra.join(" "));
+    assert.match(err, why);
+    assert.deepEqual(requests, []);
+  }
+  const { status, err } = await called(["status", "--pool", "C:\\p", "--chat"]);
+  assert.equal(status, 2);
+  assert.match(err, /^usage: chuggy-windows/u);
 });

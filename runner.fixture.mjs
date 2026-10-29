@@ -10,7 +10,7 @@
  * same string always names the same file, as it would on Windows.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 
@@ -90,6 +90,25 @@ export async function machineDirectory(t) {
  */
 export async function poolFileWritten(file, pool) {
   await writeFile(file, JSON.stringify(pool));
+  return file;
+}
+
+/**
+ * A Claude token file in a directory of its own under `home`, with each of
+ * `beside` there too, as a chat host's is kept. Off Windows the file and its
+ * directory are two entries of the working directory, each named for its
+ * Windows path, so the directory is made to list the file by its name.
+ *
+ * @param {string} home
+ * @param {readonly string[]} [beside]
+ */
+export async function tokenAloneWritten(home, beside = []) {
+  const directory = win32.join(home, "claude");
+  const file = win32.join(directory, "token");
+  await mkdir(directory, { recursive: true });
+  for (const name of [win32.basename(file), ...beside])
+    await writeFile(join(directory, name), "");
+  await writeFile(file, "claude-token-fixture");
   return file;
 }
 

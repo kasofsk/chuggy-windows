@@ -158,8 +158,27 @@ export async function poolServiceAsked(
   withinMs = poolServiceAskMs,
 ) {
   if (pipe === undefined) return undefined;
+  return poolServiceWithin(pipe, controlAsked(pipe, request), withinMs);
+}
+
+/**
+ * What an ask of the service at `pipe` answers, refused where it takes past
+ * `withinMs`.
+ *
+ * @template T
+ * @param {string} pipe
+ * @param {Promise<T>} asking
+ * @param {number} [withinMs]
+ * @returns {Promise<T>}
+ */
+export async function poolServiceWithin(
+  pipe,
+  asking,
+  withinMs = poolServiceAskMs,
+) {
   /** @type {NodeJS.Timeout | undefined} */
   let timer;
+  /** @type {Promise<never>} */
   const late = new Promise((_, reject) => {
     timer = setTimeout(
       () =>
@@ -172,7 +191,7 @@ export async function poolServiceAsked(
     );
   });
   try {
-    return await Promise.race([controlAsked(pipe, request), late]);
+    return await Promise.race([asking, late]);
   } finally {
     clearTimeout(timer);
   }

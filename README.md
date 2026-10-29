@@ -46,6 +46,8 @@ chuggy-windows register --api <chuggy's origin> --token=<token> --personal
 
 It takes no `--pool`, and the file is named for the tenant and the member. A member has one personal runner in a tenant, so registering again, from here or any machine, replaces it as registering a pool again does. Every other command takes its file as it takes a pool's.
 
+A member's chat host is registered with `--chat`: see [A chat host](#a-chat-host).
+
 ## Configure
 
 **The pool file** is what registering the pool wrote, such as `%APPDATA%\chuggy\pools\vteng.chuggy.shame.json`. Every command but `register` takes it as `--pool <file>`, or from `CHUGGY_WINDOWS_POOL`. Only you, SYSTEM and the Administrators may be able to open it.
@@ -89,6 +91,7 @@ It takes no `--pool`, and the file is named for the tenant and the member. A mem
 | `memoryFreeGibMin` | no      | The GiB of Docker Desktop's VM's memory its containers leave free for the engine and the VM, below; 0.3.0 or later. Default 0, which makes all of it the budget. |
 | `memoryReservedGib` | no | The GiB of the memory budget no job may ask, kept for what always runs beside the jobs, below; 0.4.0 or later. Default 0, which lets a job ask the whole budget. |
 | `dockerDiskDirectory` | no   | The directory holding Docker Desktop's disk image, `docker_data.vhdx`, where its settings moved it. Default `%LOCALAPPDATA%\Docker\wsl\disk`. |
+| `chat` | no | A chat host's own settings, in [A chat host](#a-chat-host); 0.8.0 or later. Default none, every setting its default. A chat host needs `claudeTokenFile` alone in a directory of its own. |
 
 Save the token file under `%APPDATA%`, where only you may open it. Docker Desktop shows a file it mounts to every user in the container, so a job reads it as the image's user.
 
@@ -147,13 +150,51 @@ Host jobs on Windows are not yet whole: the worker core runs a project's `setup`
 
 A service the project's checks need, such as a database, is yours and never chuggy's: start it from a check inside the image, or run it in Docker Desktop on the jobs' network and hand every job its address through `environment`.
 
+## A chat host
+
+A member's chat host runs that member's chats with chuggy, each a session, on their own machine and their own Claude login, in one Docker Desktop container of chuggy's chat image that it keeps running. It is one per member in a tenant. A tenant administrator grants the member the right to register one; the member mints a chat host registration token through chuggy's API, `POST /api/v1/tenants/:tenant/chat-host-registration-tokens`, then:
+
+```powershell
+chuggy-windows register --api <chuggy's origin> --token=<token> --chat
+```
+
+It takes no `--pool`, `--host` or `--capability`, and declares nothing: the file is named for the tenant and the member, then `chat.host`, and its task for the file. Registering again, from here or any machine, replaces the host: chuggy denies the earlier one, so its service stops, and `register` here restarts this machine's task on the new file. `run`, `service`, `status`, `doctor` and `install-service` take the file as they take a pool's; `once` and `stop` refuse it, since a chat host runs only as its service and a session is stopped in chuggy.
+
+It reads the same runner's file as a pool's service: its `claudeTokenFile`, `network`, and `timeoutSecsMax` and `outputBytesMax`, which the file still requires. What is its own is under `chat`, each key optional and any other an error:
+
+```json
+"chat": {
+  "image": { "image": "ghcr.io/you/chuggy-chat:1", "pull": "missing" },
+  "sessionsMax": 4,
+  "sessionMemoryMib": 2048,
+  "idleSecs": 600,
+  "outputBytesMax": 1048576
+}
+```
+
+| Key                | Meaning |
+| ------------------ | ------- |
+| `image`            | The image to run in place of the one chuggy names, and `pull`: `missing` (the default) pulls it where it is not here, `always` before each start, `never` not at all. Pulled with this machine's own login for its registry. Default none, which runs chuggy's. |
+| `sessionsMax`      | Sessions run at once. Default 4. |
+| `sessionMemoryMib` | The memory the container is given for each of those, in MiB. Default 2048. The container is capped at `sessionsMax` times this, with no swap past it, and a session that takes more than its share takes it from the others. |
+| `idleSecs`         | How long a session may sit idle before it ends, which chuggy caps. Default 600. |
+| `outputBytesMax`   | The most output a session may report. Default the file's `outputBytesMax`. |
+
+`chat` needs chuggy-windows 0.8.0 or later, and so does a chat host's file: an earlier copy refuses a runner.json naming `chat`, so check `chuggy-windows --version` before writing it.
+
+The container is chuggy's supervisor, run as root inside with only the capabilities it needs to make each session's user, and no privilege escalation. Its memory cap, as `sessionMemoryMib` says, is asked of Docker Desktop; `status` and `doctor` print it. It runs each session as a user of its own, which it clears once the session ends, and keeps their directories and the repositories they read in two volumes named for the host, `chuggy-chat-<digest>-sessions` and `-mirrors`, which nothing removes. It is named for the host too, `chuggy-chat-<digest>`, so a second started beside it is refused: one that has exited is removed before each start, and one still running is never killed for it, so a container no service runs refuses every start until it is removed, which `doctor` reports with the command that removes it. It joins `network`, and a session reaches whatever that reaches. Its input is the run's, so it ends when the run does, and every session with it.
+
+The Claude token file's directory is mounted into the container read-only, whole, so a Windows chat host needs the token file alone in a directory of its own, such as `%APPDATA%\chuggy-windows\claude\token`; `run` and `doctor` refuse one with anything beside it, or that anyone else may open. Docker Desktop shows that directory and the file inside the container as root's, open to every user, so the supervisor reads the file as root, behind a directory only root may open, and hands each session a copy only that session's user reads; a token renewed in place serves the next session. Every session uses your Claude plan.
+
+`doctor` checks the chat host's file and the runner's, the directories the runner keeps secrets in, the token file and that it is alone in its directory, the settings and the memory cap they make, the task, the engine and the host's containers, the network, that no supervisor's container is running that the service does not run, a token and one poll of the plane, and that the image the host would run is here or can be pulled: it pulls it where it is not, as the host would before starting, under the host's token where it is in chuggy's registry. `status` prints the `chat` settings, whether the service is running, and from the service, the supervisor's phase and the image it runs against the one chuggy names. Each session's log is kept in `%LOCALAPPDATA%\chuggy-windows\logs\chuggy-chat-<digest>.log`, opening with its assignment.
+
 ## Check
 
 ```powershell
 chuggy-windows doctor --pool $env:APPDATA\chuggy\pools\vteng.chuggy.shame.json
 ```
 
-Its first line names the copy speaking and the Node it runs under. It checks both files and who may open them, the directories the runner keeps secrets in, the token file, whether jobs are handed Docker Desktop's engine, whether the pool file's task runs this copy, the capabilities a run advertises, the engine and what its VM has, the job network, the free disk against the floor, a token from the pool's issuer and one poll of the plane, which advertises none, and changes nothing. The poll is a long one, so the last check can take a while.
+Its first line names the copy speaking and the Node it runs under. It checks both files and who may open them, the directories the runner keeps secrets in, the token file, whether jobs are handed Docker Desktop's engine, whether the pool file's task runs this copy, the capabilities a run advertises, the engine and what its VM has, the job network, the free disk against the floor, a token from the pool's issuer and one poll of the plane, which advertises none, and changes nothing. The poll is a long one, so the last check can take a while. Of a chat host it checks what [A chat host](#a-chat-host) says.
 
 ## Run as a service
 
@@ -181,12 +222,12 @@ and to start it again, `/ENABLE` then `/Run`. Ending the task ends the service, 
 
 | Command             | What it does                                                                                                            |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `register`          | Redeems a registration token for a pool file, and starts its service where it can.                                      |
-| `run`               | The runner: polls until the plane denies the pool.                                                                      |
+| `register`          | Redeems a registration token for a pool file, a personal runner's with `--personal` or a chat host's with `--chat`, and starts its service where it can. |
+| `run`               | The runner: polls until the plane denies the pool or chat host.                                                         |
 | `service`           | What the task runs: `run`, started again after it ends unless the plane denied the pool.                                 |
-| `once`              | One poll, then waits for what it placed to start, and for a job on this machine itself to end. Holds the pool as `run` does, so each is refused while the other runs. |
-| `status`            | The runner's limits, the free disk against its floor, the room, ceiling and sessions in the memory budget, this pool's containers, the service's jobs on this machine itself and what it is still pulling, starting or holding for room, each named a job or a session. |
-| `stop <assignment>` | Stops one assignment's container, through the service when it is running; a job on this machine itself only through the service. |
+| `once`              | One poll, then waits for what it placed to start, and for a job on this machine itself to end. Holds the pool as `run` does, so each is refused while the other runs. Refused of a chat host. |
+| `status`            | The runner's limits, the free disk against its floor, the room, ceiling and sessions in the memory budget, this pool's containers, the service's jobs on this machine itself and what it is still pulling, starting or holding for room, each named a job or a session; of a chat host, its settings and its supervisor. |
+| `stop <assignment>` | Stops one assignment's container, through the service when it is running; a job on this machine itself only through the service. Refused of a chat host. |
 | `doctor`            | The checks above.                                                                                                       |
 | `install-service`   | Registers the pool's scheduled task.                                                                                    |
 

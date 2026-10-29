@@ -1,6 +1,6 @@
 {
   "name": "chuggy-windows",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Runs a chuggy worker pool's jobs in Docker Desktop containers on a Windows machine",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.28.0/chuggy-worker-contract-1.28.0.tgz",
-    "@chuggy/worker-core": "github:Valensta/chuggy-common#15fffe9bc2bdea324d96ad5dfe6feea593b80fa8",
+    "@chuggy/worker-core": "git+file:///Users/apple/eanna/chuggy/chuggy-common#d7f44c6dae96c6e67963d36c639f4c96bda26026",
     "zod": "4.5.4"
   },
   "bundleDependencies": [
@@ -31,6 +31,8 @@
     "typescript-eslint": "^8.68.0"
   },
   "files": [
+    "chatDoctor.mjs",
+    "chatRunner.mjs",
     "cli.mjs",
     "commands.mjs",
     "diskFree.mjs",

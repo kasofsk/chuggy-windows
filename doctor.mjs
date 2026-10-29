@@ -1,10 +1,13 @@
 /**
  * What `doctor` checks, in the order a run depends on them, each answered as
  * passed or not with what was found, and before the engine whether the pool
- * file's task runs this copy. It changes nothing: a missing network is
- * reported for a run to make, and its one poll names nothing held, wants
- * nothing and advertises nothing, which the plane answers without granting
- * or releasing a lease or changing what the pool advertised.
+ * file's task runs this copy. Of a pool it changes nothing: a missing
+ * network is reported for a run to make, and its one poll names nothing
+ * held, wants nothing and advertises nothing, which the plane answers
+ * without granting or releasing a lease or changing what the pool
+ * advertised. Of a member's chat host it checks what `chatDoctor.mjs` says,
+ * and makes one change: the image its supervisor runs is pulled where it is
+ * not here, as the host's run would pull it before starting.
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -34,12 +37,21 @@ import {
   engineFailureLine,
 } from "@chuggy/worker-core/engineErrors.mjs";
 import {
+  poolIdentityChatHost,
   poolIdentityPersonal,
   poolLabelValue,
 } from "@chuggy/worker-core/poolIdentity.mjs";
+import {
+  chatCredentialDirectoryFinding,
+  chatImageFinding,
+  chatServiceAsked,
+  chatSettingsFinding,
+  chatSupervisorFinding,
+} from "./chatDoctor.mjs";
 import { diskFloorSaid } from "./diskFree.mjs";
 import {
   credentialFileRefusal,
+  runnerChatSettingsLine,
   runnerCodexAgent,
   runnerCredentialDescribed,
   runnerConfig,
@@ -50,6 +62,7 @@ import {
   engineEndpoint,
   engineMachine,
   engineSocketHanded,
+  poolRuntimeDirectory,
   runnerCapabilities,
   runnerSecretDirectories,
 } from "./runner.mjs";
@@ -66,6 +79,7 @@ import {
 
 /**
  * @typedef {import("@chuggy/worker-core/poolCredentials.mjs").PoolCredentials} PoolCredentials
+ * @typedef {import("@chuggy/worker-core/poolIdentity.mjs").ChatHostIdentity} ChatHostIdentity
  * @typedef {import("@chuggy/worker-core/poolLoop.mjs").WorkerPoolClient} WorkerPoolClient
  * @typedef {import("@chuggy/worker-core/engine.mjs").Engine} Engine
  * @typedef {import("./runnerConfig.mjs").RunnerConfig} RunnerConfig
@@ -88,6 +102,7 @@ import {
  * @property {string} cli this CLI's entry, as an absolute path
  * @property {import("./diskFree.mjs").DiskFreePorts} disk what the free disk is measured by
  * @property {string} arch this machine, as `process.arch` names it
+ * @property {import("./poolService.mjs").PoolLocking} [locking] how a pool's lock is taken, when not as Windows holds one
  * @property {DoctorParts} parts
  */
 
@@ -281,6 +296,36 @@ async function diskFloorFinding(engine, config, input) {
 }
 
 /**
+ * Whether the network every container here joins is present, or a run makes
+ * it.
+ *
+ * @param {Engine} engine
+ * @param {RunnerConfig} config
+ * @param {DoctorFinding[]} findings
+ */
+async function jobNetworkChecked(engine, config, findings) {
+  await checked(findings, "job network", async () => {
+    const inspected = await engine.exec(networkInspectArgv(config.network));
+    if (inspected.code === 0) return [true, `${config.network} is present`];
+    if (engineFailure(inspected) === "NotFound")
+      return [true, `${config.network} is missing, and a run makes it`];
+    throw new Error(engineFailureLine(inspected));
+  });
+}
+
+/**
+ * How many of a pool's containers the engine lists.
+ *
+ * @param {Engine} engine
+ * @param {PoolCredentials} credentials
+ */
+async function containersCounted(engine, credentials) {
+  const listed = await engine.exec(listArgv(poolLabelValue(credentials)));
+  if (listed.code !== 0) throw new Error(engineFailureLine(listed));
+  return listed.stdout.split("\n").filter((id) => id.trim()).length;
+}
+
+/**
  * @param {Engine} engine
  * @param {PoolCredentials} credentials
  * @param {RunnerConfig} config
@@ -291,9 +336,7 @@ async function engineChecks(engine, credentials, config, input, findings) {
   const reachable = await checked(findings, "container engine", async () => {
     const endpoint = await engineEndpoint(engine);
     const machine = await engineMachine(engine);
-    const listed = await engine.exec(listArgv(poolLabelValue(credentials)));
-    if (listed.code !== 0) throw new Error(engineFailureLine(listed));
-    const count = listed.stdout.split("\n").filter((id) => id.trim()).length;
+    const count = await containersCounted(engine, credentials);
     return [
       true,
       `docker at ${endpoint}, on ${String(machine.cpuMillis / 1000)} CPUs and ${String(machine.memoryMib)} MiB, lists ${String(count)} of this pool's containers`,
@@ -301,21 +344,19 @@ async function engineChecks(engine, credentials, config, input, findings) {
   });
   if (reachable === undefined) return;
   findings.push(engineSocketFinding(config));
-  await checked(findings, "job network", async () => {
-    const inspected = await engine.exec(networkInspectArgv(config.network));
-    if (inspected.code === 0) return [true, `${config.network} is present`];
-    if (engineFailure(inspected) === "NotFound")
-      return [true, `${config.network} is missing, and a run makes it`];
-    throw new Error(engineFailureLine(inspected));
-  });
+  await jobNetworkChecked(engine, config, findings);
   findings.push(await ownerVolumesFinding(engine, credentials, config));
   findings.push(await diskFloorFinding(engine, config, input));
 }
 
 /**
+ * The pool's token, then one poll of its plane, answering the session image
+ * the plane names, where it names one.
+ *
  * @param {DoctorInput} input
  * @param {PoolCredentials} credentials
  * @param {DoctorFinding[]} findings
+ * @returns {Promise<{chatImage: string | undefined} | undefined>} where the plane answered
  */
 async function planeChecks(input, credentials, findings) {
   const token = await checked(findings, "pool token", async () => {
@@ -323,14 +364,104 @@ async function planeChecks(input, credentials, findings) {
     if (acquired.acquired !== "Token") throw new Error(acquired.evidence);
     return [acquired.token, `issued by ${credentials.tokenUrl}`];
   });
-  if (token === undefined) return;
-  await checked(findings, "plane", async () => {
+  if (token === undefined) return undefined;
+  return checked(findings, "plane", async () => {
     const polled = await input.parts.plane(credentials).poll(token, [], 0, 0);
     if (polled.polled === "Stale")
       throw new Error("the plane rejected a token the issuer had just issued");
     if (polled.polled !== "Reconciled") throw new Error(polled.evidence);
-    return [true, `${credentials.planeUrl} answered a poll`];
+    return [
+      { chatImage: polled.chatImage },
+      `${credentials.planeUrl} answered a poll`,
+    ];
   });
+}
+
+/**
+ * Docker Desktop as a chat host's supervisor is run by, and what it checks
+ * there: the host's containers, the network, and a supervisor's container no
+ * service here runs.
+ *
+ * @param {Engine} engine
+ * @param {ChatHostIdentity} identity
+ * @param {RunnerConfig} config
+ * @param {DoctorInput} input
+ * @param {DoctorFinding[]} findings
+ * @returns {Promise<string | undefined>} the endpoint, where the engine answered
+ */
+async function chatEngineChecks(engine, identity, config, input, findings) {
+  const endpoint = await checked(findings, "container engine", async () => {
+    const reached = await engineEndpoint(engine);
+    const count = await containersCounted(engine, identity);
+    return [
+      reached,
+      `docker at ${reached} lists ${String(count)} of this chat host's containers`,
+    ];
+  });
+  if (endpoint === undefined) return undefined;
+  await jobNetworkChecked(engine, config, findings);
+  findings.push(
+    await chatSupervisorFinding(engine, identity, () =>
+      chatServiceAsked(
+        poolRuntimeDirectory(input.paths, identity),
+        input.locking,
+      ),
+    ),
+  );
+  return endpoint;
+}
+
+/**
+ * What a member's chat host needs beyond its file, the runner's file, the
+ * runner's directories and the Claude token file: the token file alone in
+ * its directory, its settings, the task as a pool's, Docker Desktop, the
+ * plane, and the image its supervisor runs, which is checked once the plane
+ * named one or the host sets its own, and pulled only into directories
+ * this account alone may open.
+ *
+ * @param {DoctorInput} input
+ * @param {ChatHostIdentity} identity
+ * @param {RunnerConfig | undefined} config
+ * @param {boolean} secret whether the runner's directories are this account's alone
+ * @param {DoctorFinding[]} findings
+ */
+async function chatHostChecks(input, identity, config, secret, findings) {
+  if (config !== undefined) {
+    findings.push(await chatCredentialDirectoryFinding(config));
+    findings.push(chatSettingsFinding(identity, config));
+  }
+  findings.push(await serviceTaskFinding(input));
+  const engine = config === undefined ? undefined : input.parts.engine(config);
+  const endpoint =
+    engine === undefined || config === undefined
+      ? undefined
+      : await chatEngineChecks(engine, identity, config, input, findings);
+  const polled = await planeChecks(input, identity, findings);
+  if (
+    engine === undefined ||
+    config === undefined ||
+    endpoint === undefined ||
+    !secret ||
+    (polled === undefined && config.chat?.image === undefined)
+  )
+    return findings;
+  findings.push(
+    await chatImageFinding(
+      {
+        engine,
+        site: {
+          engine: config.engine,
+          runtimeDir: poolRuntimeDirectory(input.paths, identity),
+          dockerHost: endpoint,
+        },
+        credentials: identity,
+        tokens: input.parts.tokens(identity),
+      },
+      config.chat,
+      polled?.chatImage,
+    ),
+  );
+  return findings;
 }
 
 /**
@@ -557,14 +688,19 @@ export async function doctorFindings(input) {
     );
     return [
       read,
-      `${input.poolFile} names ${poolIdentityPersonal(read) ? "personal runner" : "pool"} ${poolLabelValue(read)}`,
+      `${input.poolFile} names ${poolIdentityChatHost(read) ? "chat host" : poolIdentityPersonal(read) ? "personal runner" : "pool"} ${poolLabelValue(read)}`,
     ];
   });
+  const chat = credentials !== undefined && poolIdentityChatHost(credentials);
   const config = await checked(findings, "runner configuration", async () => {
     const read = await runnerConfig(input.paths.config, input.sharedRefusal);
-    return [read, `${input.paths.config}: ${runnerConfigLimits(read)}`];
+    return [
+      read,
+      `${input.paths.config}: ${chat ? runnerChatSettingsLine(read) : runnerConfigLimits(read)}`,
+    ];
   });
-  findings.push(await directoriesFinding(input));
+  const directories = await directoriesFinding(input);
+  findings.push(directories);
   if (config !== undefined)
     await checked(findings, "Claude token file", async () => {
       const refusal = await credentialFileRefusal(
@@ -574,6 +710,14 @@ export async function doctorFindings(input) {
       if (refusal !== undefined) throw new Error(refusal);
       return [true, `${config.claudeTokenFile}, this account's own`];
     });
+  if (chat)
+    return chatHostChecks(
+      input,
+      credentials,
+      config,
+      directories.passed,
+      findings,
+    );
   if (credentials !== undefined && config !== undefined) {
     const codex = await codexCredentialFinding(input, credentials, config);
     if (codex !== undefined) findings.push(codex);

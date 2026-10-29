@@ -11,7 +11,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 
 import { poolCredentials } from "@chuggy/worker-core/poolCredentials.mjs";
-import { poolIdentityPersonal } from "@chuggy/worker-core/poolIdentity.mjs";
+import {
+  poolIdentityChatHost,
+  poolIdentityPersonal,
+} from "@chuggy/worker-core/poolIdentity.mjs";
 import { workerPoolClientPass } from "@chuggy/worker-core/poolLoop.mjs";
 import {
   poolRunnerPassLine,
@@ -20,6 +23,9 @@ import {
 } from "@chuggy/worker-core/poolRunner.mjs";
 
 import { controlServer } from "@chuggy/worker-core/control.mjs";
+import { chatHostControl } from "@chuggy/worker-core/chatHost.mjs";
+import { chatServiceAsked } from "./chatDoctor.mjs";
+import { chatRunnerLoop, chatRunnerParts } from "./chatRunner.mjs";
 import { diskFloorSaid, diskFreePorts } from "./diskFree.mjs";
 import { memoryBudgetSaid } from "./memoryFree.mjs";
 import { doctorFindings, findingLine } from "./doctor.mjs";
@@ -49,7 +55,11 @@ import {
   hostPlatform,
   scratchRemovedOnEnd,
 } from "./runner.mjs";
-import { runnerConfigLimits, runnerPaths } from "./runnerConfig.mjs";
+import {
+  runnerChatSettingsLine,
+  runnerConfigLimits,
+  runnerPaths,
+} from "./runnerConfig.mjs";
 import {
   commandLine,
   deniedExitStatus,
@@ -109,25 +119,31 @@ import {
 export const poolFileVariable = "CHUGGY_WINDOWS_POOL";
 
 const usage = `usage: chuggy-windows <command> [--pool <file>]
-       chuggy-windows register --api <origin> --token=<token> [--pool <name> | --personal]
+       chuggy-windows register --api <origin> --token=<token>
+                               [--pool <name> | --personal | --chat]
                                [--host] [--capability <token>]...
        chuggy-windows --version
 
   register                redeem a registration token for a pool file, the
                           pool named for this machine unless --pool names it,
                           or with --personal a member's personal token for
-                          their personal runner's file, and start its service
-                          where it can; it declares the platform its
+                          their personal runner's file, or with --chat a
+                          chat host's token for their chat host's file, and
+                          start its service where it can; a pool or a
+                          personal runner declares the platform its
                           containers run and each --capability, and with
                           --host runs a job that pins no image on this
                           machine itself
-  run                     run the pool until the plane denies it
+  run                     run the pool, or the chat host, until the plane
+                          denies it
   service                 what the pool's task runs: run, started again
                           after it ends unless the plane denied the pool
-  once                    one pass, then wait for what it placed to start
+  once                    one pass, then wait for what it placed to start;
+                          not of a chat host
   status                  this pool's limits and containers, and what the
-                          service is placing
-  stop <assignment>       stop one assignment's container
+                          service is placing, or a chat host's settings and
+                          supervisor
+  stop <assignment>       stop one assignment's container; not of a chat host
   doctor                  check everything a run needs
   install-service         register the scheduled task that runs \`service\`
 
@@ -171,14 +187,15 @@ async function started(call, run = { places: true }) {
  *
  * @template T
  * @param {CliHost} host
- * @param {Awaited<ReturnType<typeof started>>["runner"]} runner
+ * @param {string} runtime the pool's runtime directory
  * @param {import("./poolService.mjs").PoolServiceKind} kind
+ * @param {import("@chuggy/worker-core/control.mjs").ControlBackend} backend what the pipe answers of
  * @param {() => Promise<T>} work
  * @returns {Promise<T>}
  */
-async function claimed(host, runner, kind, work) {
+async function claimed(host, runtime, kind, backend, work) {
   const hold = await poolServiceClaimed(
-    runner.runtime,
+    runtime,
     process.pid,
     kind,
     host.locking,
@@ -186,11 +203,8 @@ async function claimed(host, runner, kind, work) {
   /** @type {import("node:net").Server | undefined} */
   let server;
   try {
-    await poolServiceLeftoversRemoved(
-      runner.runtime,
-      await readdir(runner.runtime),
-    );
-    server = await controlServer(hold.pipe, runner.backend);
+    await poolServiceLeftoversRemoved(runtime, await readdir(runtime));
+    server = await controlServer(hold.pipe, backend);
     return await work();
   } finally {
     await hold.release();
@@ -206,7 +220,7 @@ async function claimed(host, runner, kind, work) {
 async function run(call) {
   const { setup, runner } = await started(call);
   await runnerDirectories(setup.paths, runner.runtime);
-  return claimed(call.host, runner, "run", async () => {
+  return claimed(call.host, runner.runtime, "run", runner.backend, async () => {
     await runnerLeftoversRemoved(runner.runtime);
     scratchRemovedOnEnd(runner.runtime, {
       supervised: call.host.environment[supervisedVariable] === "1",
@@ -265,23 +279,29 @@ async function once(call) {
   const { setup, runner } = await started(call);
   await runnerDirectories(setup.paths, runner.runtime);
   try {
-    return await claimed(call.host, runner, "once", async () => {
-      await runnerLeftoversRemoved(runner.runtime);
-      scratchRemovedOnEnd(runner.runtime, {
-        supervised: false,
-        stdin: call.host.stdin,
-        exit: call.host.exit,
-      });
-      await jobNetwork(runner.engine, setup.config.network);
-      const pass = await workerPoolClientPass(runner.client);
-      await runner.backend.settled();
-      if (pass.passed === "Reconciled") {
-        call.host.out(poolRunnerPassLine(pass));
-        return 0;
-      }
-      call.host.err(`${pass.passed}: ${pass.evidence}`);
-      return pass.passed === "Denied" ? deniedExitStatus : 1;
-    });
+    return await claimed(
+      call.host,
+      runner.runtime,
+      "once",
+      runner.backend,
+      async () => {
+        await runnerLeftoversRemoved(runner.runtime);
+        scratchRemovedOnEnd(runner.runtime, {
+          supervised: false,
+          stdin: call.host.stdin,
+          exit: call.host.exit,
+        });
+        await jobNetwork(runner.engine, setup.config.network);
+        const pass = await workerPoolClientPass(runner.client);
+        await runner.backend.settled();
+        if (pass.passed === "Reconciled") {
+          call.host.out(poolRunnerPassLine(pass));
+          return 0;
+        }
+        call.host.err(`${pass.passed}: ${pass.evidence}`);
+        return pass.passed === "Denied" ? deniedExitStatus : 1;
+      },
+    );
   } catch (failure) {
     if (/** @type {{code?: unknown}} */ (failure)?.code !== poolHeldCode)
       throw failure;
@@ -393,6 +413,7 @@ function doctorFound(host, poolFile) {
     cli: host.cli,
     disk: host.disk ?? diskFreePorts,
     arch: host.arch,
+    locking: host.locking,
     parts: {
       engine: (config) => host.engine ?? runnerEngine(config),
       tokens: (credentials) => host.tokens ?? poolRunnerTokens(credentials),
@@ -701,7 +722,11 @@ async function registerServed(host, pool, file, written) {
     return await registerRestarted(
       host,
       file,
-      poolIdentityPersonal(pool) ? "this personal runner's" : "the pool's",
+      poolIdentityPersonal(pool)
+        ? "this personal runner's"
+        : poolIdentityChatHost(pool)
+          ? "the chat host's"
+          : "the pool's",
       name,
     );
   } catch (failure) {
@@ -716,9 +741,10 @@ async function registerServed(host, pool, file, written) {
 /**
  * Redeems a registration token, writes the pool file it answers, and leaves
  * the file's service running where it can. It takes no pool file: its
- * `--pool` is the name the pool takes, and `--personal` redeems a member's
- * personal token, which names no pool. `--host` declares this machine's own
- * platform beside its containers'. Once the file is written it exits 0
+ * `--pool` is the name the pool takes, `--personal` redeems a member's
+ * personal token, which names no pool, and `--chat` a member's chat host's,
+ * which declares nothing. `--host` declares this machine's own platform
+ * beside its containers'. Once the file is written it exits 0
  * whatever became of the service, since a rerun would spend another token.
  *
  * @param {CliHost} host
@@ -772,6 +798,125 @@ async function register(host, { capability, ...named }) {
   return 0;
 }
 
+/**
+ * A chat host's run: the host claimed as a pool's run claims its pool, so a
+ * second is refused before it removes the first's scratch, and its pipe
+ * answering what the host says of itself, then the host until the plane
+ * denies it.
+ *
+ * @param {CliCall} call
+ */
+async function chatRun(call) {
+  const { host, poolFile } = call;
+  const setup = await runnerSetup(
+    poolFile,
+    host.environment,
+    host.home,
+    host.sharedRefusal,
+  );
+  await runnerDirectoriesChecked(setup.paths, poolFile, host.sharedRefusal);
+  const { chat, engine, runtime } = await chatRunnerParts(setup, {
+    log: host.out,
+    sharedRefusal: host.sharedRefusal,
+    engine: host.engine,
+    tokens: host.tokens,
+    fetch: host.fetch,
+  });
+  await runnerDirectories(setup.paths, runtime);
+  return claimed(host, runtime, "run", chatHostControl(chat), async () => {
+    await runnerLeftoversRemoved(runtime);
+    scratchRemovedOnEnd(runtime, {
+      supervised: host.environment[supervisedVariable] === "1",
+      stdin: host.stdin,
+      exit: host.exit,
+    });
+    if ((await jobNetwork(engine, setup.config.network)) === "Created")
+      host.out(`made the job network ${setup.config.network}`);
+    return chatRunnerLoop(chat);
+  });
+}
+
+/**
+ * A chat host's settings, and what the service holding it says of its
+ * supervisor.
+ *
+ * @param {CliCall} call
+ */
+async function chatStatus(call) {
+  const { host, poolFile } = call;
+  const setup = await runnerSetup(
+    poolFile,
+    host.environment,
+    host.home,
+    host.sharedRefusal,
+  );
+  await runnerDirectoriesChecked(setup.paths, poolFile, host.sharedRefusal);
+  const service = await chatServiceAsked(
+    poolRuntimeDirectory(setup.paths, setup.credentials),
+    host.locking,
+  );
+  host.out(
+    "unreadable" in service
+      ? `service: holds the chat host, but could not be asked: ${service.unreadable}`
+      : "status" in service
+        ? "service: running"
+        : "service: not running",
+  );
+  host.out(`chat: ${runnerChatSettingsLine(setup.config)}`);
+  if (!("status" in service)) return 0;
+  const { supervisor, starting, used, named } = service.status;
+  host.out(
+    `supervisor: ${supervisor.toLowerCase()}${starting ? ", starting" : ""}`,
+  );
+  host.out(
+    `image: running ${used ?? "none yet"}; chuggy names ${named ?? "none yet"}`,
+  );
+  return 0;
+}
+
+/**
+ * A pool's command, refused of a chat host.
+ *
+ * @param {string} why
+ */
+function chatRefused(why) {
+  /** @param {CliCall} call */
+  return async (call) => {
+    call.host.err(why);
+    return 2;
+  };
+}
+
+/** Each command of a chat host's file. */
+const chatCommands = {
+  run: chatRun,
+  service,
+  once: chatRefused(
+    "a chat host runs only as its service; start it with chuggy-windows run, which its task runs",
+  ),
+  status: chatStatus,
+  stop: chatRefused("a chat host's sessions are stopped in chuggy"),
+  doctor,
+  "install-service": installService,
+};
+
+/**
+ * Whether the pool file is a member's chat host's, and not where it cannot
+ * be read or anyone else may open it, which the pool's command then says.
+ *
+ * @param {CliHost} host
+ * @param {string} poolFile
+ */
+async function poolFileChatHost(host, poolFile) {
+  try {
+    return poolIdentityChatHost(
+      await poolCredentials(poolFile, (file) => host.sharedRefusal(file)),
+    );
+  } catch {
+    return false;
+  }
+}
+
 const commands = {
   run,
   service,
@@ -797,6 +942,7 @@ export async function cliMain(argv, host) {
         api: { type: "string" },
         token: { type: "string" },
         personal: { type: "boolean" },
+        chat: { type: "boolean" },
         host: { type: "boolean" },
         capability: { type: "string", multiple: true },
         help: { type: "boolean", short: "h" },
@@ -828,6 +974,7 @@ export async function cliMain(argv, host) {
         values.api !== undefined ||
         values.token !== undefined ||
         values.personal !== undefined ||
+        values.chat !== undefined ||
         values.host !== undefined ||
         values.capability !== undefined)) ||
     (name !== "stop" && positionals.length > 0)
@@ -844,11 +991,11 @@ export async function cliMain(argv, host) {
   }
   try {
     if (registering) return await register(host, values);
-    return await command({
-      host,
-      poolFile: win32.resolve(/** @type {string} */ (poolFile)),
-      positionals,
-    });
+    const resolved = win32.resolve(/** @type {string} */ (poolFile));
+    const chosen = (await poolFileChatHost(host, resolved))
+      ? chatCommands[/** @type {keyof typeof chatCommands} */ (name)]
+      : command;
+    return await chosen({ host, poolFile: resolved, positionals });
   } catch (failure) {
     host.err(failureMessage(failure));
     return 1;

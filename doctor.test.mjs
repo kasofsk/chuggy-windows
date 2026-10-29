@@ -1,15 +1,26 @@
 import assert from "node:assert/strict";
 import { mkdir, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { win32 } from "node:path";
 import test from "node:test";
 
+import {
+  chatHostControl,
+  chatSupervisorName,
+} from "@chuggy/worker-core/chatHost.mjs";
+import { controlServer } from "@chuggy/worker-core/control.mjs";
 import { hostTimeoutSecsMax } from "@chuggy/worker-core/hostBackend.mjs";
 
 import { doctorFindings, findingLine } from "./doctor.mjs";
 import { poolProjectDigest } from "@chuggy/worker-core/poolIdentity.mjs";
 
 import { fakeDisk, fakeEngine } from "./engine.fixture.mjs";
+import { poolServiceClaimed } from "./poolService.mjs";
+import { registeredChatHostFixture } from "./register.fixture.mjs";
+import { poolRuntimeDirectory } from "./runner.mjs";
+import { runnerPaths } from "./runnerConfig.mjs";
 import {
+  fakeLocking,
   fixturePool,
   fixtureUserSid,
   poolFileWritten,
@@ -17,6 +28,7 @@ import {
   usersReadAcl,
   usersRefusal,
   hostedPool,
+  tokenAloneWritten,
 } from "./runner.fixture.mjs";
 import { serviceQueryArgv, serviceTask } from "./serviceTask.mjs";
 import { fakeTaskScheduler } from "./taskScheduler.fixture.mjs";
@@ -44,6 +56,8 @@ const taskName = "\\chuggy-windows\\pool";
  * @property {Record<string, string>} [files] other files written, by path, with their text
  * @property {readonly ("pool" | "runtime" | "logs" | "jobs")[]} [made] which of the runner's directories are made: the pool file's, the runtime directory, the logs and the host jobs'
  * @property {(acls: Map<string, import("./windowsAcl.mjs").Acl>, files: {poolFile: string, config: string, tokenFile: string, pool: string, runtime: string, logs: string, jobs: string}) => void} [shared] who else may open which file
+ * @property {(home: string) => Promise<unknown>} [before] what else is made under the profile before doctor runs
+ * @property {import("./poolService.mjs").PoolLocking} [locking] how a pool's lock is taken, a lock no one holds where none
  */
 
 /**
@@ -111,6 +125,7 @@ async function doctored(t, options = {}) {
     await mkdir(made, { recursive: true });
   for (const [path, text] of Object.entries(options.files ?? {}))
     await writeFile(path, text);
+  await options.before?.(fixture.home);
   options.shared?.(fixture.acls, {
     poolFile,
     config: fixture.paths.config,
@@ -131,6 +146,7 @@ async function doctored(t, options = {}) {
     tasks: scheduler.scheduler,
     ...copy,
     disk: options.disk ?? fakeDisk(100),
+    locking: options.locking ?? fakeLocking().locking,
     parts: issuerAndPlane(options, engine, polls),
   });
   return {
@@ -906,4 +922,251 @@ test("doctor holds the Codex credential to the rule a run does and reads it as a
     warning: true,
     detail: `this pool advertises Agent:Codex and ${declared.paths.config} names no codexCredential, so its Codex jobs are handed the Claude token file; add codexCredential to hand them a Codex auth.json`,
   });
+});
+
+/** A session image in the chat host's own registry. */
+const chatImage = "chuggy-registry.chuggy.example/chuggy/chat:1";
+
+/** The Claude token file a chat host's runner's file names, alone in its directory. */
+const chatTokenFile = "C:\\Users\\op\\claude\\token";
+
+/**
+ * doctor's findings for a chat host's file, its Claude token file alone in a
+ * directory of its own unless `beside` names more there or `before` makes
+ * it otherwise, and the plane naming `chatImage` unless `polled` says
+ * otherwise.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {DoctoredOptions & {beside?: readonly string[]}} [options]
+ */
+function doctoredChat(t, options = {}) {
+  const { beside, ...rest } = options;
+  return doctored(t, {
+    pool: registeredChatHostFixture,
+    polled: {
+      polled: "Reconciled",
+      assignments: [],
+      stop: [],
+      chatImage,
+    },
+    ...rest,
+    runner: { claudeTokenFile: chatTokenFile, ...options.runner },
+    before: rest.before ?? ((home) => tokenAloneWritten(home, beside)),
+  });
+}
+
+/** What doctor names the fixture's chat host's file as. */
+const chatHostNamed =
+  "chat host newtenant/28:https:%2F%2Fauth.chuggy.example%2F0f3c9a52-member/chat/host";
+
+test("doctor checks a chat host's file for what its run needs, and nothing a pool's jobs do", async (t) => {
+  const { findings, poolFile, paths, state, polls } = await doctoredChat(t, {
+    engine: (engine) => engine.images.add(chatImage),
+  });
+  assert.deepEqual(
+    findings.map((found) => [found.check, found.passed, found.warning]),
+    [
+      ["pool file", true, undefined],
+      ["runner configuration", true, undefined],
+      ["runner directories", true, undefined],
+      ["Claude token file", true, undefined],
+      ["chat credential directory", true, undefined],
+      ["chat settings", true, undefined],
+      ["service task", true, undefined],
+      ["container engine", true, undefined],
+      ["job network", true, undefined],
+      ["chat supervisor", true, undefined],
+      ["pool token", true, undefined],
+      ["plane", true, undefined],
+      ["chat image", true, undefined],
+    ],
+  );
+  const detail = (/** @type {string} */ check) =>
+    finding(findings, check)?.detail;
+  assert.equal(detail("pool file"), `${poolFile} names ${chatHostNamed}`);
+  assert.equal(
+    detail("runner configuration"),
+    `${paths.config}: sessionsMax 4, sessionMemoryMib 2048, the supervisor's cap asked of the engine 8192 MiB, idleSecs 600, outputBytesMax 65536, running the image chuggy names`,
+  );
+  assert.equal(
+    detail("chat credential directory"),
+    `${chatTokenFile} is alone in its directory, which the chat supervisor is given read-only`,
+  );
+  assert.equal(
+    detail("chat settings"),
+    "docker is asked to cap the supervisor at 8192 MiB, 2048 MiB for each of its 4 sessions at once, with no swap past it",
+  );
+  assert.equal(
+    detail("container engine"),
+    "docker at npipe:////./pipe/dockerDesktopLinuxEngine lists 0 of this chat host's containers",
+  );
+  assert.match(detail("chat supervisor") ?? "", /^no container chuggy-chat-/u);
+  assert.equal(detail("chat image"), `the plane's ${chatImage} is here`);
+  assert.deepEqual(polls, [["pool-token", [], 0, 0]]);
+  assert.ok(!state.calls.some((call) => call.argv[0] === "pull"));
+});
+
+test("a chat host's image not here is pulled under the pool's token from its registry, its own as its pull says, and none named fails", async (t) => {
+  const pulled = await doctoredChat(t);
+  assert.deepEqual(finding(pulled.findings, "chat image"), {
+    check: "chat image",
+    passed: true,
+    detail: `the plane's ${chatImage} was pulled`,
+  });
+  const pull = pulled.state.calls.find((call) => call.argv[0] === "pull");
+  assert.ok(pull?.authFile?.includes("chuggy-registry.chuggy.example"));
+  assert.ok(!pull?.argv.some((word) => word.includes("pool-token")));
+  const never = await doctoredChat(t, {
+    runner: { chat: { image: { image: "localhost/mine:1", pull: "never" } } },
+  });
+  assert.deepEqual(never.findings.at(-1), {
+    check: "chat image",
+    passed: false,
+    detail:
+      "the host's own localhost/mine:1 is not here, and chat.image.pull is never",
+  });
+  const unnamed = await doctoredChat(t, {
+    polled: { polled: "Reconciled", assignments: [], stop: [] },
+  });
+  assert.match(
+    finding(unnamed.findings, "chat image")?.detail ?? "",
+    /^the plane named no session image and the runner's file sets no chat\.image/u,
+  );
+});
+
+test("a chat host's token file not alone in its directory fails, and so do settings no supervisor starts from", async (t) => {
+  const beside = await doctoredChat(t, { beside: ["notes.txt"] });
+  const directory = finding(beside.findings, "chat credential directory");
+  assert.equal(directory?.passed, false);
+  assert.match(
+    directory?.detail ?? "",
+    /holds notes\.txt beside the credential/u,
+  );
+  const rooted = await doctoredChat(t, {
+    runner: { claudeTokenFile: "C:\\token" },
+    files: { "C:\\token": "claude-token-fixture" },
+  });
+  assert.deepEqual(finding(rooted.findings, "chat settings"), {
+    check: "chat settings",
+    passed: false,
+    detail: "the credential's file is in no directory of its own",
+  });
+});
+
+test("a chat host whose runner directories anyone else may open is not pulled for", async (t) => {
+  const { findings, state } = await doctoredChat(t, {
+    made: ["runtime"],
+    shared: (acls, { runtime }) => acls.set(runtime, usersReadAcl),
+  });
+  assert.equal(finding(findings, "runner directories")?.passed, false);
+  assert.equal(finding(findings, "chat image"), undefined);
+  assert.ok(!state.calls.some((call) => call.argv[0] === "pull"));
+});
+
+test("a chat host's supervisor container no service here runs fails, naming its removal; the service's own, or an exited one, passes, and one whose service cannot be asked is warned of", async (t) => {
+  const name = chatSupervisorName(
+    /** @type {any} */ (registeredChatHostFixture),
+  );
+  /** @param {string} status */
+  const contained = (status) => (/** @type {any} */ engine) =>
+    engine.containers.set(name, {
+      id: "c1",
+      name,
+      labels: {},
+      status,
+      image: chatImage,
+    });
+  const left = await doctoredChat(t, { engine: contained("running") });
+  assert.deepEqual(finding(left.findings, "chat supervisor"), {
+    check: "chat supervisor",
+    passed: false,
+    detail: `${name} is running and no service here runs it, so every start of this host's supervisor is refused; remove it with docker rm -f ${name}, which ends every session it runs`,
+  });
+  const exited = await doctoredChat(t, { engine: contained("exited") });
+  assert.equal(
+    finding(exited.findings, "chat supervisor")?.detail,
+    `${name} has exited, and the next start removes it`,
+  );
+  for (const [served, passed, warning, detail] of /** @type {const} */ ([
+    [
+      { status: () => ({ supervisor: "Ready", starting: false }) },
+      true,
+      undefined,
+      new RegExp(`^${name} is the service's supervisor, ready$`, "u"),
+    ],
+    [
+      undefined,
+      true,
+      true,
+      new RegExp(
+        `^${name} is running, and the service holding the host answers what this copy could not read, so it is taken as that service's: `,
+        "u",
+      ),
+    ],
+  ])) {
+    const locks = fakeLocking();
+    const found = await doctoredChat(t, {
+      engine: contained("running"),
+      locking: locks.locking,
+      before: async (home) => {
+        await tokenAloneWritten(home);
+        await chatServiceHeld(t, home, locks, served);
+      },
+    });
+    const supervisor = finding(found.findings, "chat supervisor");
+    assert.equal(supervisor?.passed, passed);
+    assert.equal(supervisor?.warning, warning);
+    assert.match(supervisor?.detail ?? "", detail);
+  }
+});
+
+/**
+ * The chat host held by another process, answering on its pipe with what
+ * `chat` says of it, or dropping every ask where there is none.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {string} home
+ * @param {ReturnType<typeof fakeLocking>} locks
+ * @param {{status: () => unknown} | undefined} chat
+ */
+async function chatServiceHeld(t, home, locks, chat) {
+  const paths = runnerPaths(
+    {
+      APPDATA: win32.join(home, "AppData", "Roaming"),
+      LOCALAPPDATA: win32.join(home, "AppData", "Local"),
+    },
+    home,
+  );
+  const runtime = poolRuntimeDirectory(
+    paths,
+    /** @type {any} */ (registeredChatHostFixture),
+  );
+  await mkdir(runtime, { recursive: true });
+  const hold = await poolServiceClaimed(runtime, 4242, "run", locks.locking);
+  const server =
+    chat === undefined
+      ? createServer((socket) => socket.destroy())
+      : await controlServer(
+          hold.pipe,
+          chatHostControl(/** @type {any} */ (chat)),
+        );
+  if (chat === undefined)
+    await new Promise((resolve) =>
+      server.listen(hold.pipe, () => resolve(undefined)),
+    );
+  t.after(() => server.close());
+}
+
+test("doctor fails a chat host's file declaring what a pool's or a personal runner's does, and checks nothing of a chat host", async (t) => {
+  for (const declared of [{ capabilities: [] }, { host: true }]) {
+    const { findings } = await doctoredChat(t, {
+      pool: { ...registeredChatHostFixture, ...declared },
+    });
+    assert.equal(findings[0]?.check, "pool file");
+    assert.equal(findings[0]?.passed, false);
+    assert.ok(
+      !findings.some((found) => found.check.startsWith("chat ")),
+      JSON.stringify(findings),
+    );
+  }
 });

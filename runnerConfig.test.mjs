@@ -4,6 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  chatHostConfigured,
+  chatHostIdleSecs,
+  chatHostMemoryBytes,
+  chatHostSessionsMaxDefault,
+  chatSessionMemoryBytesDefault,
+} from "@chuggy/worker-core/chatHost.mjs";
 import { reservedJobVariables } from "@chuggy/worker-core/job.mjs";
 
 import {
@@ -14,6 +21,7 @@ import {
 import {
   bindMountNameable,
   credentialFileRefusal,
+  runnerChatSettingsLine,
   runnerConfig,
   runnerConfigLimits,
   runnerPaths,
@@ -526,4 +534,76 @@ test("the runner reports on itself only where its file turns that on", async (t)
       ),
     });
   }
+});
+
+test("a chat host's settings line says each of its chat keys, the core's default where one is absent, and the supervisor's memory cap", async (t) => {
+  const directory = await scratch(t);
+  const bare = await runnerConfig(await written(directory, minimal), ownerOnly);
+  assert.equal(bare.chat, undefined);
+  const defaults = chatHostConfigured(undefined, minimal.outputBytesMax);
+  /** @param {number} bytes */
+  const mib = (bytes) => String(bytes / 2 ** 20);
+  assert.equal(
+    runnerChatSettingsLine(bare),
+    `sessionsMax ${String(chatHostSessionsMaxDefault)}, sessionMemoryMib ${mib(chatSessionMemoryBytesDefault)}, the supervisor's cap asked of the engine ${mib(chatHostMemoryBytes(defaults))} MiB, idleSecs ${String(chatHostIdleSecs)}, outputBytesMax 65536, running the image chuggy names`,
+  );
+  const empty = await runnerConfig(
+    await written(directory, { ...minimal, chat: {} }),
+    ownerOnly,
+  );
+  assert.equal(runnerChatSettingsLine(empty), runnerChatSettingsLine(bare));
+  const chat = {
+    image: { image: "registry.example/me/chat:1" },
+    sessionsMax: 3,
+    sessionMemoryMib: 1024,
+    idleSecs: 300,
+    outputBytesMax: 1024,
+  };
+  const set = await runnerConfig(
+    await written(directory, { ...minimal, chat }),
+    ownerOnly,
+  );
+  assert.deepEqual(set.chat, {
+    ...chat,
+    image: { image: "registry.example/me/chat:1", pull: "missing" },
+  });
+  assert.equal(
+    runnerChatSettingsLine(set),
+    "sessionsMax 3, sessionMemoryMib 1024, the supervisor's cap asked of the engine 3072 MiB, idleSecs 300, outputBytesMax 1024, running registry.example/me/chat:1, pulled where it is missing",
+  );
+  for (const pull of ["always", "never"])
+    assert.match(
+      runnerChatSettingsLine(
+        await runnerConfig(
+          await written(directory, {
+            ...minimal,
+            chat: { image: { image: "x", pull } },
+          }),
+          ownerOnly,
+        ),
+      ),
+      new RegExp(`running x, pulled ${pull}$`, "u"),
+    );
+});
+
+test("what a chat section may not say is refused, naming where", async (t) => {
+  const directory = await scratch(t);
+  for (const [chat, why] of [
+    [{ sessionMax: 2 }, /chat Unrecognized key: "sessionMax"/u],
+    [{ sessionsMax: 0 }, /chat\.sessionsMax /u],
+    [{ sessionMemoryMib: 1 }, /chat\.sessionMemoryMib /u],
+    [{ idleSecs: 1.5 }, /chat\.idleSecs /u],
+    [{ outputBytesMax: "1024" }, /chat\.outputBytesMax /u],
+    [{ image: "registry.example/me/chat:1" }, /chat\.image /u],
+    [{ image: { image: "x", pull: "sometimes" } }, /chat\.image\.pull /u],
+    [
+      { image: { image: "x", tag: "1" } },
+      /chat\.image Unrecognized key: "tag"/u,
+    ],
+  ])
+    await assert.rejects(
+      runnerConfig(await written(directory, { ...minimal, chat }), ownerOnly),
+      why,
+      JSON.stringify(chat),
+    );
 });

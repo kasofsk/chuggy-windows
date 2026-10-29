@@ -8,6 +8,10 @@
  * credential beside it, which a job requiring that agent is handed in its
  * place: Codex's by `codexCredential`.
  *
+ * A MEMBER'S CHAT HOST READS THE SAME FILE: its engine, its Claude token file
+ * and its network are the file's, and `chat` holds what is its own, each key
+ * a default where it is absent.
+ *
  * Every path is a Windows path, built with `path.win32`, so the suites hold
  * them on any machine.
  */
@@ -17,6 +21,11 @@ import { win32 } from "node:path";
 
 import { z } from "zod";
 
+import {
+  chatHostConfigSchema,
+  chatHostConfigured,
+  chatHostMemoryBytes,
+} from "@chuggy/worker-core/chatHost.mjs";
 import {
   ownerImagesSchema,
   ownerVolumesSchema,
@@ -181,6 +190,8 @@ export const runnerConfigSchema = z
     memoryReservedGib: nonnegativeSchema.max(freeGibMax).default(0),
     /** Whether each pool's service sends chuggy a report of how it and this machine are doing. */
     reportMetrics: z.boolean().default(false),
+    /** A member's chat host's own settings. */
+    chat: chatHostConfigSchema.optional(),
     /**
      * The directory holding Docker Desktop's disk image, `docker_data.vhdx`,
      * where its settings moved it; the drive it is on is measured.
@@ -273,6 +284,26 @@ export function runnerCredentialsHanded(config) {
  */
 export function runnerConfigLimits(config) {
   return `concurrencyMax ${String(config.concurrencyMax)}, sessionsMax ${String(config.sessionsMax)}`;
+}
+
+/**
+ * A chat host's settings as `status` and `doctor` say them, each its default
+ * where the file names none, and the memory its supervisor's engine is asked
+ * to cap it at.
+ *
+ * @param {RunnerConfig} config
+ */
+export function runnerChatSettingsLine(config) {
+  const settings = chatHostConfigured(config.chat, config.outputBytesMax);
+  const { sessionsMax, sessionMemoryBytes, idleSecs, outputBytesMax, image } =
+    settings;
+  /** @param {number} bytes */
+  const mib = (bytes) => String(Math.floor(bytes / 2 ** 20));
+  const run =
+    image === undefined
+      ? "the image chuggy names"
+      : `${image.image}, pulled ${image.pull === "missing" ? "where it is missing" : image.pull}`;
+  return `sessionsMax ${String(sessionsMax)}, sessionMemoryMib ${mib(sessionMemoryBytes)}, the supervisor's cap asked of the engine ${mib(chatHostMemoryBytes(settings))} MiB, idleSecs ${String(idleSecs)}, outputBytesMax ${String(outputBytesMax)}, running ${run}`;
 }
 
 /**
