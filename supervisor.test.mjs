@@ -109,7 +109,7 @@ test("a run that ends for any reason but a denial is started again after restart
     "2026-10-16T12:00:03.000Z killed",
     `2026-10-16T12:00:04.000Z run exited -1; starting it again in ${String(restartDelayMs / 1000)}s`,
     "2026-10-16T12:00:05.000Z the plane denied this pool",
-    `2026-10-16T12:00:06.000Z the plane denied ${host.poolFile}; the service ends until the pool is registered again`,
+    `2026-10-16T12:00:06.000Z the plane denied ${host.poolFile}; the service ends until it is registered again`,
   ]);
 });
 
@@ -202,7 +202,7 @@ test("a log past serviceLogBytesMax is moved aside, to one older copy, before th
   assert.equal(await readFile(`${host.logFile}.1`, "utf8"), old);
   assert.deepEqual(await log(), [
     "2026-10-16T12:00:00.000Z fresh",
-    `2026-10-16T12:00:01.000Z the plane denied ${host.poolFile}; the service ends until the pool is registered again`,
+    `2026-10-16T12:00:01.000Z the plane denied ${host.poolFile}; the service ends until it is registered again`,
   ]);
   await writeFile(host.logFile, "y".repeat(serviceLogBytesMax));
   await serviceLogged(host, "kept");
@@ -331,6 +331,6 @@ test("lines past serviceLogLinesQueuedMax waiting to be written are dropped, and
   );
   assert.match(
     written.at(-1) ?? "",
-    /the service ends until the pool is registered again$/u,
+    /the service ends until it is registered again$/u,
   );
 });

@@ -999,7 +999,7 @@ test("the service starts run, and on the plane's denial ends, logging it under t
   const log = win32.join(paths.logs, "service-pool.log");
   assert.match(
     await readFile(log, "utf8"),
-    /^\S+Z the plane denied this pool\n\S+Z the plane denied C:\\Users\\op\\pool\.json; the service ends until the pool is registered again\n$/u,
+    /^\S+Z the plane denied this pool\n\S+Z the plane denied C:\\Users\\op\\pool\.json; the service ends until it is registered again\n$/u,
   );
   const denied = win32.join(paths.runtime, "service", "pool.denied");
   assert.equal(

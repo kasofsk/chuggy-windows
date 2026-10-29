@@ -212,7 +212,7 @@ export async function supervisor(host) {
     if (ended === deniedExitStatus) {
       await deniedRemembered(host, stamp);
       await log(
-        `the plane denied ${host.poolFile}; the service ends until the pool is registered again`,
+        `the plane denied ${host.poolFile}; the service ends until it is registered again`,
       );
       return 0;
     }
