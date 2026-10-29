@@ -16,6 +16,7 @@ import test from "node:test";
 import {
   chatHostControl,
   chatHostStatusAsked,
+  chatSupervisorName,
 } from "@chuggy/worker-core/chatHost.mjs";
 import { controlServer } from "@chuggy/worker-core/control.mjs";
 import { heldCreateArgv } from "@chuggy/worker-core/engineArgv.mjs";
@@ -1924,6 +1925,41 @@ test("a chat host's run holds it as a pool's run does, answers what it says of i
     code: "ENOENT",
   });
   assert.deepEqual([...locks.held], []);
+});
+
+test("a chat host's run removes a supervisor's container a run that ended left running, and says so", async (t) => {
+  const { poolFile, machine } = await chatMachine(t);
+  const { engine, state } = fakeEngine();
+  const name = chatSupervisorName(
+    /** @type {any} */ (registeredChatHostFixture),
+  );
+  state.containers.set(name, {
+    id: "id-left",
+    name,
+    labels: {},
+    status: "running",
+    image: chatImage,
+  });
+  const { status, out } = await called(["run", "--pool", poolFile], {
+    ...machine,
+    engine,
+    tokens: deniedTokens,
+  });
+  assert.equal(status, deniedExitStatus);
+  assert.ok(!state.containers.has(name));
+  assert.match(
+    out,
+    new RegExp(
+      `^removed the supervisor container ${name}, which a run that ended left$`,
+      "mu",
+    ),
+  );
+  const again = await called(["run", "--pool", poolFile], {
+    ...machine,
+    engine,
+    tokens: deniedTokens,
+  });
+  assert.doesNotMatch(again.out, /removed the supervisor container/u);
 });
 
 test("a second run of a chat host is refused while another holds it", async (t) => {

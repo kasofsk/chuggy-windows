@@ -20,11 +20,17 @@ import {
   chatHost,
   chatHostConfigured,
   chatHostVolumes,
+  chatSupervisorName,
   chatSupervisorNaming,
   chatSupervisorStarted,
   checkedChatHostSettings,
 } from "@chuggy/worker-core/chatHost.mjs";
 import { chatSessionLogs } from "@chuggy/worker-core/chatHostLog.mjs";
+import { forcedRemoveArgv } from "@chuggy/worker-core/engineArgv.mjs";
+import {
+  engineFailure,
+  engineFailureLine,
+} from "@chuggy/worker-core/engineErrors.mjs";
 
 import {
   engineEndpoint,
@@ -147,6 +153,32 @@ export async function chatRunnerParts(setup, host) {
     ...(host.fetch === undefined ? {} : { fetch: host.fetch }),
   });
   return { chat, engine, runtime };
+}
+
+/**
+ * Removes a supervisor's container a run that ended left running, said in
+ * the log. Windows ends no process with its parent, and a supervisor ends
+ * only once the engine passes its input's end on to it, so a run killed
+ * whole can leave one behind, which refuses every later start. A run that
+ * holds the host's lock is the only one of it, so any such container is no
+ * other run's. One the engine cannot remove is said, and the start then
+ * refuses beside it as the core does.
+ *
+ * @param {import("@chuggy/worker-core/engine.mjs").Engine} engine
+ * @param {ChatHostIdentity} identity
+ * @param {(line: string) => void} log
+ */
+export async function chatSupervisorLeftRemoved(engine, identity, log) {
+  const name = chatSupervisorName(identity);
+  const removed = await engine.exec(forcedRemoveArgv(name));
+  if (removed.code === 0)
+    log(
+      `removed the supervisor container ${name}, which a run that ended left`,
+    );
+  else if (engineFailure(removed) !== "NoSuchContainer")
+    log(
+      `the supervisor container ${name} a run left could not be removed: ${engineFailureLine(removed)}`,
+    );
 }
 
 /**

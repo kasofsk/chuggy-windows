@@ -58,7 +58,7 @@ A member's chat host is registered with `--chat`: see [A chat host](#a-chat-host
 {
   "concurrencyMax": 1,
   "sessionsMax": 2,
-  "claudeTokenFile": "C:\\Users\\you\\AppData\\Roaming\\chuggy-windows\\claude-token",
+  "claudeTokenFile": "C:\\Users\\you\\AppData\\Roaming\\chuggy-windows\\claude\\claude-token",
   "timeoutSecsMax": 7200,
   "outputBytesMax": 1048576,
   "environment": {},
@@ -93,7 +93,7 @@ A member's chat host is registered with `--chat`: see [A chat host](#a-chat-host
 | `dockerDiskDirectory` | no   | The directory holding Docker Desktop's disk image, `docker_data.vhdx`, where its settings moved it. Default `%LOCALAPPDATA%\Docker\wsl\disk`. |
 | `chat` | no | A chat host's own settings, in [A chat host](#a-chat-host); 0.8.0 or later. Default none, every setting its default. A chat host needs `claudeTokenFile` alone in a directory of its own. |
 
-Save the token file under `%APPDATA%`, where only you may open it. Docker Desktop shows a file it mounts to every user in the container, so a job reads it as the image's user.
+Save the token file under `%APPDATA%`, where only you may open it, in a directory of its own: a chat host's supervisor is handed that directory whole. Docker Desktop shows a file it mounts to every user in the container, so a job reads it as the image's user.
 
 A file is yours alone where you, SYSTEM or the Administrators own it and no one else is allowed anything by its access rules. The directories the runner keeps secrets in, the pool file's and those under `%LOCALAPPDATA%\chuggy-windows`, are held to the same: `register` spends no token, and no other command runs, where one is not, as it would not be if `APPDATA` or `LOCALAPPDATA` named a shared one. A directory not made yet is held to the one it would be made in.
 

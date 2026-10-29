@@ -25,7 +25,11 @@ import {
 import { controlServer } from "@chuggy/worker-core/control.mjs";
 import { chatHostControl } from "@chuggy/worker-core/chatHost.mjs";
 import { chatServiceAsked } from "./chatDoctor.mjs";
-import { chatRunnerLoop, chatRunnerParts } from "./chatRunner.mjs";
+import {
+  chatRunnerLoop,
+  chatRunnerParts,
+  chatSupervisorLeftRemoved,
+} from "./chatRunner.mjs";
 import { diskFloorSaid, diskFreePorts } from "./diskFree.mjs";
 import { memoryBudgetSaid } from "./memoryFree.mjs";
 import { doctorFindings, findingLine } from "./doctor.mjs";
@@ -832,6 +836,13 @@ async function chatRun(call) {
     });
     if ((await jobNetwork(engine, setup.config.network)) === "Created")
       host.out(`made the job network ${setup.config.network}`);
+    await chatSupervisorLeftRemoved(
+      engine,
+      /** @type {import("@chuggy/worker-core/poolIdentity.mjs").ChatHostIdentity} */ (
+        setup.credentials
+      ),
+      host.out,
+    );
     return chatRunnerLoop(chat);
   });
 }
