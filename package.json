@@ -1,6 +1,6 @@
 {
   "name": "chuggy-windows",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Runs a chuggy worker pool's jobs in Docker Desktop containers on a Windows machine",
   "license": "MIT",
   "type": "module",
@@ -12,8 +12,8 @@
     "chuggy-windows": "cli.mjs"
   },
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.28.0/chuggy-worker-contract-1.28.0.tgz",
-    "@chuggy/worker-core": "github:Valensta/chuggy-common#d7f44c6dae96c6e67963d36c639f4c96bda26026",
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.30.0/chuggy-worker-contract-1.30.0.tgz",
+    "@chuggy/worker-core": "github:Valensta/chuggy-common#74ff82d6975168f6854d3688d73fbe6ca239c92e",
     "zod": "4.5.4"
   },
   "bundleDependencies": [
