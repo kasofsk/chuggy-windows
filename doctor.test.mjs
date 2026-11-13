@@ -174,7 +174,7 @@ const finding = (findings, check) =>
  * @param {import("./runnerConfig.mjs").RunnerPaths} paths
  */
 const advertisedFrom = (paths) =>
-  `a run advertises Platform:Linux:Amd64, container on each poll: the platforms it runs, the agents ${paths.config} can run, and the rest of what the pool was registered with`;
+  `a run advertises Platform:Linux:Amd64, container, Agent:Claude on each poll: the platforms it runs, the agents ${paths.config} can run, and the rest of what the pool was registered with`;
 
 /** What doctor finds of the fixture's issuer and plane, each answering. */
 const planeFound = [
@@ -214,9 +214,9 @@ test("a machine ready to run passes every check, and doctor changes nothing", as
       detail: `C:\\Users\\op, ${paths.runtime}, ${paths.logs}, ${paths.jobs} are this account's alone, or are made where they will be`,
     },
     {
-      check: "Claude token file",
+      check: "Claude credential",
       passed: true,
-      detail: `${tokenFile}, this account's own`,
+      detail: `claude: Claude OAuth (Subscription), the Claude token file ${tokenFile}, this account's own and readable; its bench is the service's, which doctor cannot read`,
     },
     {
       check: "service task",
@@ -354,7 +354,7 @@ test("a pool file that cannot be read leaves the engine and the plane unchecked,
       ["pool file", false],
       ["runner configuration", true],
       ["runner directories", true],
-      ["Claude token file", true],
+      ["Claude credential", true],
       ["service task", true],
     ],
   );
@@ -385,14 +385,14 @@ test("a pool file, runner's file or Claude token file anyone else may open fails
       },
     ],
   );
-  assert.equal(finding(findings, "Claude token file"), undefined);
+  assert.equal(finding(findings, "Claude credential"), undefined);
   const token = await doctored(t, {
     shared: (acls, files) => acls.set(files.tokenFile, usersReadAcl),
   });
-  assert.deepEqual(finding(token.findings, "Claude token file"), {
-    check: "Claude token file",
+  assert.deepEqual(finding(token.findings, "Claude credential"), {
+    check: "Claude credential",
     passed: false,
-    detail: `the Claude token file ${token.tokenFile} ${usersRefusal}`,
+    detail: `claude: Claude OAuth (Subscription): the Claude token file ${token.tokenFile} ${usersRefusal}`,
   });
 });
 
@@ -400,12 +400,77 @@ test("a Claude token file that is not there fails its check, saying what to save
   const { findings } = await doctored(t, {
     runner: { claudeTokenFile: "C:\\Users\\op\\missing-token" },
   });
-  assert.deepEqual(finding(findings, "Claude token file"), {
-    check: "Claude token file",
+  assert.deepEqual(finding(findings, "Claude credential"), {
+    check: "Claude credential",
     passed: false,
     detail:
-      "the Claude token file C:\\Users\\op\\missing-token cannot be found; save `claude setup-token`'s output there",
+      "claude: Claude OAuth (Subscription): the Claude token file C:\\Users\\op\\missing-token cannot be found; save `claude setup-token`'s output there, alone",
   });
+});
+
+/**
+ * Catches a set judged as one credential: each of its credentials is a
+ * finding of its own, named, and one that cannot be read fails only where the
+ * set's policy leaves no readable credential, and is warned of where another
+ * remains.
+ */
+test("doctor reports each credential of a Claude set, warning of one it cannot read where its policy allows another and failing where it allows none", async (t) => {
+  const first = "C:\\Users\\op\\claude\\max-2\\token";
+  const second = "C:\\Users\\op\\claude\\max-1\\token";
+  const runner = {
+    claudeTokenFile: undefined,
+    claudeCredential: {
+      prefer: "OAuthOnly",
+      oauth: {
+        order: "InOrder",
+        credentials: [
+          { name: "max-2", tokenFile: first },
+          { name: "max-1", tokenFile: second },
+        ],
+      },
+    },
+  };
+  /**
+   * @param {Record<string, string>} files
+   * @returns {Promise<import("./doctor.mjs").DoctorFinding[]>}
+   */
+  const claudeFound = async (files) =>
+    (await doctored(t, { runner, files })).findings.filter(
+      (found) => found.check === "Claude credential",
+    );
+  /** @param {string} name @param {string} file */
+  const readable = (name, file) => ({
+    check: "Claude credential",
+    passed: true,
+    detail: `${name}: Claude OAuth (Subscription), the Claude token file ${file}, this account's own and readable; its bench is the service's, which doctor cannot read`,
+  });
+  assert.deepEqual(
+    await claudeFound({ [first]: "token-a", [second]: "token-b" }),
+    [readable("max-2", first), readable("max-1", second)],
+  );
+  const missing = (/** @type {string} */ file) =>
+    `the Claude token file ${file} cannot be found; save \`claude setup-token\`'s output there, alone`;
+  assert.deepEqual(await claudeFound({ [second]: "token-b" }), [
+    {
+      check: "Claude credential",
+      passed: true,
+      warning: true,
+      detail: `max-2: Claude OAuth (Subscription): ${missing(first)}; Claude's OAuthOnly policy allows another that is readable`,
+    },
+    readable("max-1", second),
+  ]);
+  assert.deepEqual(await claudeFound({}), [
+    {
+      check: "Claude credential",
+      passed: false,
+      detail: `max-2: Claude OAuth (Subscription): ${missing(first)}; Claude's OAuthOnly policy allows none that is readable`,
+    },
+    {
+      check: "Claude credential",
+      passed: false,
+      detail: `max-1: Claude OAuth (Subscription): ${missing(second)}; Claude's OAuthOnly policy allows none that is readable`,
+    },
+  ]);
 });
 
 test("an engine that is not Docker Desktop as it comes fails the engine check, and the job network is not checked", async (t) => {
@@ -674,10 +739,10 @@ test("a pool registered with --host is told its imageless jobs run on this machi
   const checks = findings.map((found) => found.check);
   assert.deepEqual(
     checks.slice(
-      checks.indexOf("Claude token file"),
-      checks.indexOf("Claude token file") + 3,
+      checks.indexOf("Claude credential"),
+      checks.indexOf("Claude credential") + 3,
     ),
-    ["Claude token file", "host jobs", "service task"],
+    ["Claude credential", "host jobs", "service task"],
   );
   assert.deepEqual(finding(findings, "host jobs"), {
     check: "host jobs",
@@ -776,7 +841,7 @@ test("a pool registered with --host advertises this machine's platform beside it
   assert.deepEqual(finding(crowded.findings, "capabilities"), {
     check: "capabilities",
     passed: false,
-    detail: `runner configuration ${crowded.paths.config}: capabilities: this runner would advertise 65 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
+    detail: `runner configuration ${crowded.paths.config}: capabilities: this runner would advertise 66 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
   });
 });
 
@@ -894,23 +959,23 @@ test("doctor holds the Codex credential to the rule a run does and reads it as a
   assert.deepEqual(await codexFound(named), {
     check,
     passed: false,
-    detail: `the Codex auth file ${authFile} cannot be found; ${remedy}`,
+    detail: `codex: Codex OAuth: the Codex auth file ${authFile} cannot be found; ${remedy}`,
   });
   assert.deepEqual(await codexFound(named, "[1]"), {
     check,
     passed: false,
-    detail: `the Codex auth file ${authFile} is not a JSON object; ${remedy}`,
+    detail: `codex: Codex OAuth: the Codex auth file ${authFile} is not a JSON object; ${remedy}`,
   });
   assert.deepEqual(await codexFound(named, '{"tokens":{}}'), {
     check,
     passed: true,
-    detail: `the Codex auth file ${authFile}, this account's own`,
+    detail: `codex: Codex OAuth, the Codex auth file ${authFile}, this account's own and readable; its bench is the service's, which doctor cannot read`,
   });
   assert.deepEqual(await codexFound({ codexCredential: { authFile } }, "{}"), {
     check,
     passed: true,
     warning: true,
-    detail: `the Codex auth file ${authFile}, this account's own; this pool does not advertise Agent:Codex, since no images entry declares it and it was not registered with --host, so no job requiring Agent:Codex reaches it`,
+    detail: `codex: Codex OAuth, the Codex auth file ${authFile}, this account's own and readable; its bench is the service's, which doctor cannot read; this pool does not advertise Agent:Codex, since no images entry declares it and it was not registered with --host, so no job requiring Agent:Codex reaches it`,
   });
   assert.equal(await codexFound({ images }), undefined);
   const declared = await doctored(t, {
@@ -920,7 +985,7 @@ test("doctor holds the Codex credential to the rule a run does and reads it as a
     check,
     passed: true,
     warning: true,
-    detail: `this pool advertises Agent:Codex and ${declared.paths.config} names no codexCredential, so its Codex jobs are handed the Claude token file; add codexCredential to hand them a Codex auth.json`,
+    detail: `this pool advertises Agent:Codex and ${declared.paths.config} names no codexCredential, so its Codex jobs are handed the Claude credential's file; add codexCredential to hand them a Codex auth.json`,
   });
 });
 
@@ -969,7 +1034,7 @@ test("doctor checks a chat host's file for what its run needs, and nothing a poo
       ["pool file", true, undefined],
       ["runner configuration", true, undefined],
       ["runner directories", true, undefined],
-      ["Claude token file", true, undefined],
+      ["Claude credential", true, undefined],
       ["chat credential directory", true, undefined],
       ["chat settings", true, undefined],
       ["service task", true, undefined],
@@ -986,7 +1051,7 @@ test("doctor checks a chat host's file for what its run needs, and nothing a poo
   assert.equal(detail("pool file"), `${poolFile} names ${chatHostNamed}`);
   assert.equal(
     detail("runner configuration"),
-    `${paths.config}: sessionsMax 4, sessionMemoryMib 2048, the supervisor's cap asked of the engine 8192 MiB, idleSecs 600, outputBytesMax 65536, running the image chuggy names`,
+    `${paths.config}: sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, outputBytesMax 65536, image the one chuggy names`,
   );
   assert.equal(
     detail("chat credential directory"),

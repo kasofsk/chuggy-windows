@@ -16,6 +16,12 @@ import { win32 } from "node:path";
 import { z } from "zod";
 
 import {
+  agentCredentialPreferred,
+  agentCredentialSetCredentials,
+  agentCredentialsDescribed,
+} from "@chuggy/worker-core/agentCredentialSet.mjs";
+import { claudeCredentialRefusal } from "@chuggy/worker-core/claudeCredential.mjs";
+import {
   hostEnvironmentRefusal,
   hostPlatformsDeclared,
   hostTimeoutSecsMax,
@@ -53,6 +59,7 @@ import {
   credentialFileRefusal,
   runnerChatSettingsLine,
   runnerCodexAgent,
+  runnerCredentialSets,
   runnerCredentialDescribed,
   runnerConfig,
   runnerConfigLimits,
@@ -594,19 +601,19 @@ function capabilitiesFinding(input, credentials, config) {
 const codexCapability = `Agent:${runnerCodexAgent}`;
 
 /**
- * Why the Codex auth file is not one Codex reads, or nothing: as only doctor
- * reads it, as a JSON object, never naming what it holds or what a parser
- * said of it.
+ * Why a Codex `auth.json`'s text is none Codex reads, or nothing: it must be a
+ * JSON object. Neither what it holds nor the parser's message is named, since
+ * either may quote the credential.
  *
+ * @param {string} text
  * @param {string} file
+ * @param {{label: string, remedy: string}} described
+ * @returns {string | undefined}
  */
-async function codexAuthRefusal(file) {
-  const { label, remedy } = runnerCredentialDescribed(runnerCodexAgent);
+function codexAuthRefusal(text, file, described) {
   let document;
   try {
-    document = JSON.parse(
-      (await readFile(file, "utf8")).replace(/^\ufeff/u, ""),
-    );
+    document = JSON.parse(text.replace(/^\ufeff/u, ""));
   } catch {
     document = undefined;
   }
@@ -614,21 +621,135 @@ async function codexAuthRefusal(file) {
     document !== null &&
     !Array.isArray(document)
     ? undefined
-    : `the ${label} ${file} is not a JSON object; ${remedy}`;
+    : `the ${described.label} ${file} is not a JSON object; ${described.remedy}`;
 }
 
 /**
- * The Codex credential the runner's file names, held to the rule a run holds
- * it to and then read as a JSON object, and whether this pool advertises
- * `Agent:Codex`, which is what brings a job its file; or nothing where the
- * file names none and this pool advertises no Codex.
+ * Why a credential's file cannot be handed to a job, or is no credential of
+ * its type, or nothing. It never names what the file holds.
+ *
+ * @param {import("@chuggy/worker-core/agentCredentialSet.mjs").AgentCredential} credential
+ * @param {SharedRefusal} sharedRefusal
+ * @returns {Promise<string | undefined>}
+ */
+async function agentCredentialReadRefusal(credential, sharedRefusal) {
+  const described = runnerCredentialDescribed(credential);
+  const { file } = credential;
+  const refusal = await credentialFileRefusal(described, file, sharedRefusal);
+  if (refusal !== undefined) return refusal;
+  let text;
+  try {
+    text = (await readFile(file, "utf8")).trim();
+  } catch {
+    return `the ${described.label} ${file} cannot be read`;
+  }
+  if (credential.agent !== runnerCodexAgent)
+    return claudeCredentialRefusal(
+      /** @type {import("@chuggy/worker-core/claudeCredential.mjs").ClaudeCredentialSetting} */ (
+        credential.setting
+      ),
+      text,
+      file,
+    );
+  if (credential.type === "OAuth")
+    return codexAuthRefusal(text, file, described);
+  if (text === "")
+    return `the ${described.label} ${file} is empty; ${described.remedy}`;
+  return /[\r\n]/u.test(text)
+    ? `the ${described.label} ${file} holds more than one line; ${described.remedy}`
+    : undefined;
+}
+
+/**
+ * What a credential's finding says of its kind beside its type: Claude's
+ * kind where it is not the type's own name, and the kind's settings.
+ *
+ * @param {import("@chuggy/worker-core/agentCredentialSet.mjs").AgentCredential} credential
+ */
+function agentCredentialSettingsSaid(credential) {
+  const said = Object.entries(credential.setting ?? {}).flatMap(
+    ([key, value]) =>
+      key !== "kind"
+        ? [`${key} ${String(value)}`]
+        : value === credential.type
+          ? []
+          : [String(value)],
+  );
+  return said.length === 0 ? "" : ` (${said.join(", ")})`;
+}
+
+/**
+ * Each credential of `agent`'s set the runner's file names, one finding each,
+ * held to the rule a run holds its file to and then read, as only doctor
+ * reads it, and held to what a file of its type says. Each names the
+ * credential's name, agent, type and settings and its file, and never what
+ * the file holds; its bench is the service's, which this process cannot read.
+ * A credential that cannot be read fails where its set's policy allows none
+ * that can, and is warned of where it allows another; `every` fails each one,
+ * as a chat host that is handed every one refuses to start without it.
+ *
+ * @param {DoctorInput} input
+ * @param {RunnerConfig} config
+ * @param {"Claude" | "Codex"} agent
+ * @param {boolean} every whether each credential must be readable
+ * @returns {Promise<DoctorFinding[]>}
+ */
+async function agentCredentialFindings(input, config, agent, every) {
+  const check = `${agent} credential`;
+  const set = runnerCredentialSets(config)[agent];
+  if (set === undefined) return [];
+  const credentials = agentCredentialSetCredentials(set);
+  /** @type {Map<string, string | undefined>} */
+  const refusals = new Map();
+  for (const credential of credentials)
+    refusals.set(
+      credential.name,
+      await agentCredentialReadRefusal(credential, input.sharedRefusal),
+    );
+  const allowed =
+    "fixed" in set
+      ? [set.fixed]
+      : agentCredentialPreferred[set.prefer].flatMap(
+          (type) => set.pools[type]?.credentials ?? [],
+        );
+  const readable = allowed.some(
+    (credential) => refusals.get(credential.name) === undefined,
+  );
+  const policy =
+    "fixed" in set || credentials.length === 1
+      ? ""
+      : `; ${agent}'s ${set.prefer} policy allows ${readable ? "another" : "none"} that is readable`;
+  return agentCredentialsDescribed({ [agent]: set }).map((described) => {
+    const credential =
+      /** @type {import("@chuggy/worker-core/agentCredentialSet.mjs").AgentCredential} */ (
+        credentials.find((held) => held.name === described.name)
+      );
+    const head = `${described.name}: ${agent} ${described.type}${agentCredentialSettingsSaid(credential)}`;
+    const refusal = refusals.get(described.name);
+    if (refusal === undefined)
+      return {
+        check,
+        passed: true,
+        detail: `${head}, the ${runnerCredentialDescribed(credential).label} ${described.file}, this account's own and readable; its bench is the service's, which doctor cannot read`,
+      };
+    const detail = `${head}: ${refusal}${every ? "" : policy}`;
+    return every || !readable
+      ? { check, passed: false, detail }
+      : { check, passed: true, warning: true, detail };
+  });
+}
+
+/**
+ * Each Codex credential's finding, and whether this pool advertises
+ * `Agent:Codex`, which is what brings a job one; or a warning where the file
+ * names none and this pool advertises Codex.
  *
  * @param {DoctorInput} input
  * @param {PoolCredentials} credentials
  * @param {RunnerConfig} config
- * @returns {Promise<DoctorFinding | undefined>}
+ * @returns {Promise<DoctorFinding[]>}
  */
-async function codexCredentialFinding(input, credentials, config) {
+async function codexCredentialFindings(input, credentials, config) {
   const check = "Codex credential";
   let advertised = /** @type {string[]} */ ([]);
   try {
@@ -642,30 +763,30 @@ async function codexCredentialFinding(input, credentials, config) {
   const codex = advertised.includes(codexCapability);
   if (config.codexCredential === undefined)
     return codex
+      ? [
+          {
+            check,
+            passed: true,
+            warning: true,
+            detail: `this pool advertises ${codexCapability} and ${input.paths.config} names no codexCredential, so its Codex jobs are handed the Claude credential's file; add codexCredential to hand them a Codex auth.json`,
+          },
+        ]
+      : [];
+  const findings = await agentCredentialFindings(
+    input,
+    config,
+    runnerCodexAgent,
+    false,
+  );
+  return findings.map((finding) =>
+    finding.passed && finding.warning !== true && !codex
       ? {
-          check,
-          passed: true,
+          ...finding,
           warning: true,
-          detail: `this pool advertises ${codexCapability} and ${input.paths.config} names no codexCredential, so its Codex jobs are handed the Claude token file; add codexCredential to hand them a Codex auth.json`,
+          detail: `${finding.detail}; this pool does not advertise ${codexCapability}, since no images entry declares it and it was not registered with --host, so no job requiring ${codexCapability} reaches it`,
         }
-      : undefined;
-  const file = config.codexCredential.authFile;
-  const refusal =
-    (await credentialFileRefusal(
-      file,
-      input.sharedRefusal,
-      runnerCodexAgent,
-    )) ?? (await codexAuthRefusal(file));
-  if (refusal !== undefined) return { check, passed: false, detail: refusal };
-  const detail = `the Codex auth file ${file}, this account's own`;
-  return codex
-    ? { check, passed: true, detail }
-    : {
-        check,
-        passed: true,
-        warning: true,
-        detail: `${detail}; this pool does not advertise ${codexCapability}, since no images entry declares it and it was not registered with --host, so no job requiring ${codexCapability} reaches it`,
-      };
+      : finding,
+  );
 }
 
 /** @param {DoctorFinding} finding */
@@ -702,14 +823,9 @@ export async function doctorFindings(input) {
   const directories = await directoriesFinding(input);
   findings.push(directories);
   if (config !== undefined)
-    await checked(findings, "Claude token file", async () => {
-      const refusal = await credentialFileRefusal(
-        config.claudeTokenFile,
-        input.sharedRefusal,
-      );
-      if (refusal !== undefined) throw new Error(refusal);
-      return [true, `${config.claudeTokenFile}, this account's own`];
-    });
+    findings.push(
+      ...(await agentCredentialFindings(input, config, "Claude", chat)),
+    );
   if (chat)
     return chatHostChecks(
       input,
@@ -719,8 +835,9 @@ export async function doctorFindings(input) {
       findings,
     );
   if (credentials !== undefined && config !== undefined) {
-    const codex = await codexCredentialFinding(input, credentials, config);
-    if (codex !== undefined) findings.push(codex);
+    findings.push(
+      ...(await codexCredentialFindings(input, credentials, config)),
+    );
   }
   if (credentials?.host === true && config !== undefined)
     findings.push(hostJobsFinding(credentials, config));

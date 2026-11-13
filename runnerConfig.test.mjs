@@ -6,7 +6,6 @@ import test from "node:test";
 
 import {
   chatHostConfigured,
-  chatHostIdleSecs,
   chatHostMemoryBytes,
   chatHostSessionsMaxDefault,
   chatSessionMemoryBytesDefault,
@@ -24,6 +23,9 @@ import {
   runnerChatSettingsLine,
   runnerConfig,
   runnerConfigLimits,
+  runnerCredentialDescribed,
+  runnerCredentialSets,
+  runnerCredentialsHanded,
   runnerPaths,
 } from "./runnerConfig.mjs";
 
@@ -338,12 +340,19 @@ test("a Claude token file a job cannot be handed is refused, and one only this a
   const directory = await scratch(t);
   const file = join(directory, "claude-token");
   const { acls, asked, sharedRefusal } = sharedFixture();
+  const claude = runnerCredentialDescribed({
+    agent: "Claude",
+    name: "claude",
+    type: "OAuth",
+    file,
+    setting: { kind: "Subscription" },
+  });
   /** @param {string} path */
   const refusal = async (path) =>
-    (await credentialFileRefusal(path, sharedRefusal)) ?? "";
+    (await credentialFileRefusal(claude, path, sharedRefusal)) ?? "";
   assert.equal(
     await refusal(file),
-    `the Claude token file ${file} cannot be found; save \`claude setup-token\`'s output there`,
+    `the Claude token file ${file} cannot be found; save \`claude setup-token\`'s output there, alone`,
   );
   await writeFile(file, "");
   assert.equal(await refusal(file), `the Claude token file ${file} is empty`);
@@ -353,7 +362,10 @@ test("a Claude token file a job cannot be handed is refused, and one only this a
   );
   assert.deepEqual(asked, []);
   await writeFile(file, "claude-token-fixture");
-  assert.equal(await credentialFileRefusal(file, sharedRefusal), undefined);
+  assert.equal(
+    await credentialFileRefusal(claude, file, sharedRefusal),
+    undefined,
+  );
   acls.set(file, usersReadAcl);
   assert.equal(
     await refusal(file),
@@ -487,15 +499,20 @@ test("the named volumes a job mounts are read as listed, and a directory of this
 test("a Codex credential is the auth.json codex login writes, at a Windows absolute path a bind mount can name, and its refusal names it as one", async (t) => {
   const directory = await scratch(t);
   const authFile = "C:\\Users\\op\\.codex\\auth.json";
-  assert.deepEqual(
-    (
-      await runnerConfig(
-        await written(directory, { ...minimal, codexCredential: { authFile } }),
-        ownerOnly,
-      )
-    ).codexCredential,
-    { authFile },
+  const read = await runnerConfig(
+    await written(directory, { ...minimal, codexCredential: { authFile } }),
+    ownerOnly,
   );
+  assert.deepEqual(read.codexCredential, { authFile });
+  const { credentials } = runnerCredentialsHanded(read);
+  assert.deepEqual(credentials.agents, ["Claude", "Codex"]);
+  assert.deepEqual(credentials.chosen("Codex"), {
+    agent: "Codex",
+    name: "codex",
+    type: "OAuth",
+    file: authFile,
+  });
+  assert.equal(credentials.chosen("Claude")?.file, minimal.claudeTokenFile);
   for (const [codexCredential, why] of [
     [
       { authFile: "auth.json" },
@@ -508,9 +525,202 @@ test("a Codex credential is the auth.json codex login writes, at a Windows absol
   }
   const missing = join(directory, "auth.json");
   assert.equal(
-    await credentialFileRefusal(missing, ownerOnly, "Codex"),
+    await credentialFileRefusal(
+      runnerCredentialDescribed({
+        agent: "Codex",
+        name: "codex",
+        type: "OAuth",
+        file: missing,
+      }),
+      missing,
+      ownerOnly,
+    ),
     `the Codex auth file ${missing} cannot be found; run codex login, which writes it to %USERPROFILE%\\.codex\\auth.json`,
   );
+  assert.equal(
+    await credentialFileRefusal(
+      runnerCredentialDescribed({
+        agent: "Codex",
+        name: "codex-key",
+        type: "ApiKey",
+        file: missing,
+      }),
+      missing,
+      ownerOnly,
+    ),
+    `the Codex API key file ${missing} cannot be found; save an OpenAI API key there, alone`,
+  );
+});
+
+/** Two Claude subscription tokens in turn, an API key behind them, and a Codex login beside an API key it never runs on. */
+const sets = {
+  claudeCredential: {
+    prefer: "PreferOAuth",
+    oauth: {
+      order: "RoundRobin",
+      credentials: [
+        { name: "max-1", tokenFile: "C:\\Users\\op\\claude\\max-1\\token" },
+        { name: "max-2", tokenFile: "C:\\Users\\op\\claude\\max-2\\token" },
+      ],
+    },
+    apiKey: {
+      order: "InOrder",
+      credentials: [
+        { name: "console", apiKeyFile: "C:\\Users\\op\\claude\\key" },
+      ],
+    },
+  },
+  codexCredential: {
+    prefer: "OAuthOnly",
+    oauth: {
+      order: "InOrder",
+      credentials: [
+        { name: "chatgpt", authFile: "C:\\Users\\op\\.codex\\auth.json" },
+      ],
+    },
+    apiKey: {
+      order: "InOrder",
+      credentials: [
+        { name: "openai", apiKeyFile: "C:\\Users\\op\\codex\\key" },
+      ],
+    },
+  },
+};
+
+/** The file's required keys, none of them a credential. */
+const unnamed = { timeoutSecsMax: 3600, outputBytesMax: 65536 };
+
+/**
+ * Catches a set the core takes refused, or read other than as named, or a
+ * selector that does not take its turns.
+ */
+test("a file names each agent's credential set as the core reads it, and the selector it is handed chooses by its policy", async (t) => {
+  const directory = await scratch(t);
+  const read = await runnerConfig(
+    await written(directory, { ...unnamed, ...sets }),
+    ownerOnly,
+  );
+  assert.deepEqual(read.claudeCredential, sets.claudeCredential);
+  assert.deepEqual(read.codexCredential, sets.codexCredential);
+  const { credentials } = runnerCredentialsHanded(read);
+  assert.deepEqual(credentials.agents, ["Claude", "Codex"]);
+  assert.deepEqual(
+    [1, 2, 3].map(() => credentials.chosen("Claude")?.name),
+    ["max-1", "max-2", "max-1"],
+  );
+  assert.deepEqual(
+    credentials
+      .described()
+      .map(({ name, agent, type, file }) => [name, agent, type, file]),
+    [
+      ["max-1", "Claude", "OAuth", "C:\\Users\\op\\claude\\max-1\\token"],
+      ["max-2", "Claude", "OAuth", "C:\\Users\\op\\claude\\max-2\\token"],
+      ["console", "Claude", "ApiKey", "C:\\Users\\op\\claude\\key"],
+      ["chatgpt", "Codex", "OAuth", "C:\\Users\\op\\.codex\\auth.json"],
+      ["openai", "Codex", "ApiKey", "C:\\Users\\op\\codex\\key"],
+    ],
+  );
+});
+
+/**
+ * Catches `claudeTokenFile`, the one form a file named a Claude credential by
+ * on Windows before the sets, read differently now: it stays a subscription's
+ * token as a set of one, named for its agent.
+ */
+test("a file naming only claudeTokenFile is read as it was, a Claude subscription token as a set of one", async (t) => {
+  const directory = await scratch(t);
+  const read = await runnerConfig(
+    await written(directory, {
+      ...unnamed,
+      claudeTokenFile: minimal.claudeTokenFile,
+    }),
+    ownerOnly,
+  );
+  assert.equal(read.claudeTokenFile, minimal.claudeTokenFile);
+  assert.equal(read.claudeCredential, undefined);
+  assert.deepEqual(
+    runnerCredentialsHanded(read)
+      .credentials.described()
+      .map(({ name, agent, type, file }) => [name, agent, type, file]),
+    [["claude", "Claude", "OAuth", minimal.claudeTokenFile]],
+  );
+  assert.equal(
+    "fixed" in /** @type {object} */ (runnerCredentialSets(read).Claude),
+    false,
+  );
+});
+
+/** Each set refused, and what its refusal says. */
+/** @param {Record<string, unknown>} change */
+const claudeChanged = (change) => ({
+  claudeCredential: { ...sets.claudeCredential, ...change },
+});
+const refusedSets = [
+  [
+    claudeChanged({
+      oauth: {
+        order: "RoundRobin",
+        credentials: [{ name: "max-1", tokenFile: "max-1\\token" }],
+      },
+    }),
+    /^claudeCredential\.oauth\.credentials\.0\.tokenFile must be an absolute path$/u,
+  ],
+  [
+    claudeChanged({
+      apiKey: {
+        order: "InOrder",
+        credentials: [{ name: "console", apiKeyFile: "C:\\k,readonly=false" }],
+      },
+    }),
+    /^claudeCredential\.apiKey\.credentials\.0\.apiKeyFile cannot be named in a bind mount$/u,
+  ],
+  [
+    {
+      ...sets,
+      codexCredential: {
+        ...sets.codexCredential,
+        apiKey: {
+          order: "InOrder",
+          credentials: [
+            { name: "max-2", apiKeyFile: "C:\\Users\\op\\codex\\key" },
+          ],
+        },
+      },
+    },
+    /^codexCredential names the credential max-2, and another credential of this runner's has that name; name each once$/u,
+  ],
+  [
+    claudeChanged({ prefer: "ApiKeyOnly", apiKey: undefined }),
+    /^claudeCredential\.prefer is ApiKeyOnly, and the set names no credential it allows$/u,
+  ],
+  [
+    claudeChanged({ order: "RoundRobin" }),
+    /^claudeCredential Unrecognized key: "order"$/u,
+  ],
+  [
+    { ...sets, claudeTokenFile: minimal.claudeTokenFile },
+    /^claudeCredential names a Claude credential, and so does claudeTokenFile; keep one$/u,
+  ],
+  [{}, /^claudeTokenFile Invalid input: expected string, received undefined$/u],
+];
+
+/**
+ * Catches a set's file held to less than a single credential's, a name
+ * shared across agents accepted, a policy allowing none of what it names, a
+ * file naming no Claude credential at all, or `claudeTokenFile` beside a set.
+ */
+test("a set whose file a bind mount cannot name, whose names repeat, or whose policy allows none it names is refused, naming where, and so is a file naming no Claude credential or a set beside claudeTokenFile", async (t) => {
+  const directory = await scratch(t);
+  for (const [document, why] of refusedSets) {
+    const file = await written(directory, { ...unnamed, ...document });
+    await assert.rejects(runnerConfig(file, ownerOnly), (failure) => {
+      const said = /** @type {Error} */ (failure).message.slice(
+        `runner configuration ${file}: `.length,
+      );
+      assert.match(said, why);
+      return true;
+    });
+  }
 });
 
 test("the runner reports on itself only where its file turns that on", async (t) => {
@@ -536,7 +746,7 @@ test("the runner reports on itself only where its file turns that on", async (t)
   }
 });
 
-test("a chat host's settings line says each of its chat keys, the core's default where one is absent, and the supervisor's memory cap", async (t) => {
+test("a chat host's settings line says each of its chat keys, the core's default where one is absent and no idle limit where idleSecs is, and the supervisor's memory cap", async (t) => {
   const directory = await scratch(t);
   const bare = await runnerConfig(await written(directory, minimal), ownerOnly);
   assert.equal(bare.chat, undefined);
@@ -545,7 +755,7 @@ test("a chat host's settings line says each of its chat keys, the core's default
   const mib = (bytes) => String(bytes / 2 ** 20);
   assert.equal(
     runnerChatSettingsLine(bare),
-    `sessionsMax ${String(chatHostSessionsMaxDefault)}, sessionMemoryMib ${mib(chatSessionMemoryBytesDefault)}, the supervisor's cap asked of the engine ${mib(chatHostMemoryBytes(defaults))} MiB, idleSecs ${String(chatHostIdleSecs)}, outputBytesMax 65536, running the image chuggy names`,
+    `sessionsMax ${String(chatHostSessionsMaxDefault)}, sessionMemoryMib ${mib(chatSessionMemoryBytesDefault)}, so the supervisor is capped at ${mib(chatHostMemoryBytes(defaults))} MiB, idleSecs none, outputBytesMax 65536, image the one chuggy names`,
   );
   const empty = await runnerConfig(
     await written(directory, { ...minimal, chat: {} }),
@@ -569,9 +779,12 @@ test("a chat host's settings line says each of its chat keys, the core's default
   });
   assert.equal(
     runnerChatSettingsLine(set),
-    "sessionsMax 3, sessionMemoryMib 1024, the supervisor's cap asked of the engine 3072 MiB, idleSecs 300, outputBytesMax 1024, running registry.example/me/chat:1, pulled where it is missing",
+    "sessionsMax 3, sessionMemoryMib 1024, so the supervisor is capped at 3072 MiB, idleSecs 300, outputBytesMax 1024, image registry.example/me/chat:1, pulled where it is missing",
   );
-  for (const pull of ["always", "never"])
+  for (const [pull, said] of [
+    ["always", "before each start"],
+    ["never", "never"],
+  ])
     assert.match(
       runnerChatSettingsLine(
         await runnerConfig(
@@ -582,7 +795,7 @@ test("a chat host's settings line says each of its chat keys, the core's default
           ownerOnly,
         ),
       ),
-      new RegExp(`running x, pulled ${pull}$`, "u"),
+      new RegExp(`image x, pulled ${said}$`, "u"),
     );
 });
 

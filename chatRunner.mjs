@@ -1,9 +1,11 @@
 /**
  * A member's chat host composed: the worker core's chat host over Docker
  * Desktop, from the runner's file, with what of this machine the core cannot
- * know: who owns the Claude token file as Docker Desktop shows it.
+ * know: who owns the Claude credentials as Docker Desktop shows them. The
+ * host holds one selector over the file's sets for its life, and each session
+ * runs on the Claude credential it chooses.
  *
- * THE SUPERVISOR READS THE CLAUDE TOKEN FILE AS ROOT. Docker Desktop shows
+ * THE SUPERVISOR READS THE CLAUDE CREDENTIALS AS ROOT. Docker Desktop shows
  * every file and directory it binds from Windows as root's, open to every
  * user, inside a container, so root is the owner it is told and a session's
  * user, never root, reaches the file only through the copy it is handed.
@@ -14,6 +16,8 @@
  */
 
 import { setTimeout as delay } from "node:timers/promises";
+
+import { agentCredentialSetCredentials } from "@chuggy/worker-core/agentCredentialSet.mjs";
 
 import {
   chatCredentialAloneRefusal,
@@ -39,7 +43,9 @@ import {
 } from "./runner.mjs";
 import {
   credentialFileRefusal,
-  runnerClaudeCredential,
+  runnerCredentialDescribed,
+  runnerCredentialSets,
+  runnerCredentialsHanded,
 } from "./runnerConfig.mjs";
 import { deniedExitStatus } from "./serviceTask.mjs";
 
@@ -63,13 +69,13 @@ import { deniedExitStatus } from "./serviceTask.mjs";
  * @property {() => number} [nowMs]
  */
 
-/** Who owns the Claude token file as Docker Desktop shows it inside a container: root. */
+/** Who owns the Claude credentials as Docker Desktop shows them inside a container: root. */
 export const chatCredentialOwner = Object.freeze({ uid: 0, gid: 0 });
 
 /**
  * What the supervisor's container is given of this machine: the host's
- * volumes, the Claude token file, owned as `chatCredentialOwner` says, and
- * its kind.
+ * volumes, and a selector over the file's credentials, the Claude ones owned
+ * as `chatCredentialOwner` says.
  *
  * @param {ChatHostIdentity} identity
  * @param {RunnerConfig} config
@@ -78,9 +84,8 @@ export const chatCredentialOwner = Object.freeze({ uid: 0, gid: 0 });
 export function chatHostPlaces(identity, config) {
   return {
     volumes: chatHostVolumes(identity),
-    credentialFile: config.claudeTokenFile,
     credentialOwner: { ...chatCredentialOwner },
-    claudeCredential: runnerClaudeCredential,
+    credentials: runnerCredentialsHanded(config).credentials,
   };
 }
 
@@ -103,20 +108,30 @@ export function chatHostSettings(identity, config) {
 }
 
 /**
- * Why the Claude token file cannot be handed to the supervisor, or nothing:
- * it is not this account's alone, as a job's is not handed it, or is not
- * alone in its directory, which the supervisor is given whole.
+ * Why the Claude credentials cannot be handed to the supervisor, or nothing:
+ * the first of the file's Claude set that is not this account's alone, as a
+ * job's is not handed it, or is not alone in its directory. The supervisor is
+ * given the directory of every one of them whole, whichever a session runs
+ * on.
  *
  * @param {RunnerConfig} config
  * @param {SharedRefusal} sharedRefusal
  * @returns {Promise<string | undefined>}
  */
 export async function chatCredentialRefusal(config, sharedRefusal) {
-  const file = config.claudeTokenFile;
-  return (
-    (await credentialFileRefusal(file, sharedRefusal)) ??
-    (await chatCredentialAloneRefusal(file))
-  );
+  const set = runnerCredentialSets(config).Claude;
+  for (const credential of set === undefined
+    ? []
+    : agentCredentialSetCredentials(set)) {
+    const refusal =
+      (await credentialFileRefusal(
+        runnerCredentialDescribed(credential),
+        credential.file,
+        sharedRefusal,
+      )) ?? (await chatCredentialAloneRefusal(credential.file));
+    if (refusal !== undefined) return refusal;
+  }
+  return undefined;
 }
 
 /**

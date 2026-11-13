@@ -46,12 +46,29 @@ const config = /** @type {import("./runnerConfig.mjs").RunnerConfig} */ (
   })
 );
 
-test("a host's places are its volumes and the Claude token file, owned by root as Docker Desktop shows every file it binds", () => {
-  assert.deepEqual(chatHostPlaces(identity, config), {
+/**
+ * What a host's places hold, its selector as the credentials it describes.
+ *
+ * @param {import("@chuggy/worker-core/chatHost.mjs").ChatSupervisorPlaces} places
+ */
+const placesHeld = ({ credentials, ...places }) => ({
+  ...places,
+  credentials: credentials?.described(),
+});
+
+test("a host's places are its volumes and a selector over the Claude credentials, owned by root as Docker Desktop shows every file it binds", () => {
+  assert.deepEqual(placesHeld(chatHostPlaces(identity, config)), {
     volumes: chatHostVolumes(identity),
-    credentialFile: tokenFile,
     credentialOwner: { uid: 0, gid: 0 },
-    claudeCredential: { kind: "Subscription" },
+    credentials: [
+      {
+        name: "claude",
+        agent: "Claude",
+        type: "OAuth",
+        file: tokenFile,
+        bench: { state: "Available" },
+      },
+    ],
   });
 });
 
@@ -60,7 +77,10 @@ test("a host's settings are the core's defaults where the file names none, its o
   assert.equal(settings.sessionsMax, chatHostSessionsMaxDefault);
   assert.equal(settings.sessionMemoryBytes, chatSessionMemoryBytesDefault);
   assert.equal(settings.outputBytesMax, config.outputBytesMax);
-  assert.deepEqual(settings.places, chatHostPlaces(identity, config));
+  assert.deepEqual(
+    placesHeld(settings.places),
+    placesHeld(chatHostPlaces(identity, config)),
+  );
   const own = chatHostSettings(identity, {
     ...config,
     chat: {
@@ -129,6 +149,50 @@ test("a token file anyone else may open, or not alone in its directory, is refus
     await chatCredentialRefusal(at, sharedRefusal),
     `C:\\Users\\op\\claude holds pool.json beside the credential ${file}, and a chat host's supervisor is handed the directory whole; keep the credential in a directory of its own`,
   );
+});
+
+/**
+ * Catches a chat host started where a Claude credential of its set other
+ * than the first is anyone else's to open or shares its directory, which the
+ * supervisor is handed whole whichever credential a session runs on.
+ */
+test("every Claude credential of a set is held to what the supervisor is handed, not just the first", async (t) => {
+  await machineDirectory(t);
+  const first = await tokenAloneWritten(fixtureHome, [], "max-1");
+  const second = await tokenAloneWritten(fixtureHome, [], "max-2");
+  const at = /** @type {import("./runnerConfig.mjs").RunnerConfig} */ ({
+    ...config,
+    claudeTokenFile: undefined,
+    claudeCredential: {
+      prefer: "OAuthOnly",
+      oauth: {
+        order: "RoundRobin",
+        credentials: [
+          { name: "max-1", tokenFile: first },
+          { name: "max-2", tokenFile: second },
+        ],
+      },
+    },
+  });
+  const { acls, sharedRefusal } = sharedFixture();
+  assert.equal(await chatCredentialRefusal(at, sharedRefusal), undefined);
+  acls.set(second, usersReadAcl);
+  assert.equal(
+    await chatCredentialRefusal(at, sharedRefusal),
+    `the Claude token file ${second} ${usersRefusal}`,
+  );
+  acls.clear();
+  await tokenAloneWritten(fixtureHome, ["other.json"], "max-2");
+  assert.equal(
+    await chatCredentialRefusal(at, sharedRefusal),
+    `C:\\Users\\op\\max-2 holds other.json beside the credential ${second}, and a chat host's supervisor is handed the directory whole; keep the credential in a directory of its own`,
+  );
+  const binds = chatSupervisorContainer(
+    "img:1",
+    chatHostPlaces(identity, at),
+    2 ** 30,
+  ).binds.map(({ source }) => source);
+  assert.deepEqual(binds, ["C:\\Users\\op\\max-1", "C:\\Users\\op\\max-2"]);
 });
 
 test("a host whose plane denies it exits for the service not to start it again", async () => {

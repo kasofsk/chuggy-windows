@@ -11,6 +11,7 @@
  * nothing here says to remove it.
  */
 
+import { agentCredentialSetCredentials } from "@chuggy/worker-core/agentCredentialSet.mjs";
 import {
   chatCredentialAloneRefusal,
   chatHostMemoryBytes,
@@ -32,6 +33,7 @@ import {
 
 import { chatHostSettings } from "./chatRunner.mjs";
 import { poolServiceFound, poolServiceWithin } from "./poolService.mjs";
+import { runnerCredentialSets } from "./runnerConfig.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-core/chatHost.mjs").ChatHostStatus} ChatHostStatus
@@ -52,23 +54,27 @@ function failureMessage(failure) {
 }
 
 /**
- * Whether the Claude token file is in a directory of its own, which the
- * supervisor is given whole.
+ * Whether each Claude credential is in a directory of its own, which the
+ * supervisor is given whole whichever credential a session runs on.
  *
  * @param {RunnerConfig} config
  * @returns {Promise<DoctorFinding>}
  */
 export async function chatCredentialDirectoryFinding(config) {
   const check = "chat credential directory";
-  const file = config.claudeTokenFile;
-  const refusal = await chatCredentialAloneRefusal(file);
-  return refusal === undefined
-    ? {
-        check,
-        passed: true,
-        detail: `${file} is alone in its directory, which the chat supervisor is given read-only`,
-      }
-    : { check, passed: false, detail: refusal };
+  const set = runnerCredentialSets(config).Claude;
+  const files = (
+    set === undefined ? [] : agentCredentialSetCredentials(set)
+  ).map((credential) => credential.file);
+  for (const file of files) {
+    const refusal = await chatCredentialAloneRefusal(file);
+    if (refusal !== undefined) return { check, passed: false, detail: refusal };
+  }
+  return {
+    check,
+    passed: true,
+    detail: `${files.join(", ")} ${files.length === 1 ? "is" : "are each"} alone in its directory, which the chat supervisor is given read-only`,
+  };
 }
 
 /**

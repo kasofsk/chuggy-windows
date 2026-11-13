@@ -75,8 +75,9 @@ A member's chat host is registered with `--chat`: see [A chat host](#a-chat-host
 | `engine`          | no       | `docker`, the only one: podman on Windows is only ever a remote client.                                      |
 | `concurrencyMax`  | no       | Jobs each pool's service runs at once. Default 1.                                                            |
 | `sessionsMax`     | no       | Sessions each pool's service runs at once besides its jobs; 0 runs none. Default 2.                          |
-| `claudeTokenFile` | yes      | The file `claude setup-token`'s output was saved to, which only you may open. It is mounted into each job, never read. |
-| `codexCredential` | no | `{ "authFile": … }`, the `auth.json` `codex login` writes, which a job requiring `Agent:Codex` is handed in place of the Claude token file, below; 0.6.0 or later. Default none. |
+| `claudeTokenFile` | one of these two | The file `claude setup-token`'s output was saved to, which only you may open: a subscription's token, as a set of one. It is mounted into each job, never read. |
+| `claudeCredential` | one of these two | The Claude credentials a job runs on, one or a set of subscriptions' tokens and API keys, below; 0.10.0 or later. Not beside `claudeTokenFile`. |
+| `codexCredential` | no | `{ "authFile": … }`, the `auth.json` `codex login` writes, or a set of logins and API keys, below, which a job requiring `Agent:Codex` is handed in place of the Claude credential; 0.6.0 or later, a set 0.10.0 or later. Default none. |
 | `timeoutSecsMax`  | yes      | The longest a job may run; a job is killed at the sooner of this and its assignment's deadline.              |
 | `outputBytesMax`  | yes      | The most output a job may report.                                                                            |
 | `environment`     | no       | Variables handed to every job. `CHUG_WORKER_TASK`, `CHUG_WORKER_WORKSPACE` and `CLAUDE_CODE_OAUTH_TOKEN` are the runner's. |
@@ -91,7 +92,7 @@ A member's chat host is registered with `--chat`: see [A chat host](#a-chat-host
 | `memoryFreeGibMin` | no      | The GiB of Docker Desktop's VM's memory its containers leave free for the engine and the VM, below; 0.3.0 or later. Default 0, which makes all of it the budget. |
 | `memoryReservedGib` | no | The GiB of the memory budget no job may ask, kept for what always runs beside the jobs, below; 0.4.0 or later. Default 0, which lets a job ask the whole budget. |
 | `dockerDiskDirectory` | no   | The directory holding Docker Desktop's disk image, `docker_data.vhdx`, where its settings moved it. Default `%LOCALAPPDATA%\Docker\wsl\disk`. |
-| `chat` | no | A chat host's own settings, in [A chat host](#a-chat-host); 0.8.0 or later. Default none, every setting its default. A chat host needs `claudeTokenFile` alone in a directory of its own. |
+| `chat` | no | A chat host's own settings, in [A chat host](#a-chat-host); 0.8.0 or later. Default none, every setting its default. A chat host needs each Claude credential's file alone in a directory of its own. |
 
 Save the token file under `%APPDATA%`, where only you may open it, in a directory of its own: a chat host's supervisor is handed that directory whole. Docker Desktop shows a file it mounts to every user in the container, so a job reads it as the image's user.
 
@@ -117,14 +118,31 @@ What is removed in the VM frees room in the disk image, and Docker Desktop retur
 
 **The memory budget** is the memory of Docker Desktop's VM, as docker's `info` says it, less `memoryFreeGibMin`, a reserve for what the engine and the VM use outside every container; none is kept unless the file sets one. Every running container counts against it, whichever pool's service started it: a job or session a runner ran at its memory cap, and anything else, such as a database or what a job starts through `engineSocket`, at what `docker stats` says it uses. A job is held from when the service takes it, before its image is pulled, still this service's and shown in chuggy as starting, and starts once its image is here and the room left takes its cap; if its assignment's deadline comes too near for it to start, it fails as a job lost on its runner, which chuggy resumes by itself up to its retry limit. A held job counts at its cap on every pool's service here, as a volume named for its container with `-held`, until its container runs, and held jobs start in the order they were held. `memoryReservedGib` is kept from jobs for what always runs beside them, such as a lead's sessions: the rest of the budget is the ceiling, and a job asking more is refused, and chuggy shows its ticket as Nowhere to run this work. Each poll tells chuggy the room and the ceiling, and a chuggy that reads them offers the service only jobs that fit both; every pool's service of this account takes those one at a time, under the one claim lock beside the memory lock in `%LOCALAPPDATA%\chuggy-windows\run\memory`, so no two are given the same room. Against a chuggy that does not, no service takes a job while any job is held for room, or while the room is under the least memory a job may ask. Sessions are counted but never held, and may ask the whole budget. The count is approximate: a container counted by its use is counted at what it used when the service last counted, use outside every container is covered only by `memoryFreeGibMin`, and jobs a pool registered with `--host` runs on this machine itself are not counted. `status` says the room, the budget, the ceiling, the sessions' caps and whether the service takes jobs, and why a held job waits.
 
-**Codex.** With `codexCredential`, a job requiring `Agent:Codex` is handed that `auth.json`, mounted read-only where every job's credential is, and every other job the Claude token file. It is held to the same rule: only you, SYSTEM and the Administrators may open it, and `doctor` also reads it as a JSON object. A pool advertises `Agent:Codex` where an `images` entry declares it or the pool runs host jobs, so list the image Codex jobs run in with that capability:
+**Credential sets** (0.10.0 or later). A runner may hold more than one credential for an agent, such as two Claude subscriptions, and spread jobs across them: when one hits its usage limit, the runner moves on to the next. Save each credential to its own file, in a directory of its own, that only you may open: a subscription's token from `claude setup-token`, the `auth.json` `codex login` writes, or an API key alone in its file. Then name `claudeCredential` and/or `codexCredential` a set in place of `claudeTokenFile`, which cannot sit beside `claudeCredential`:
+
+```json
+"claudeCredential": {
+  "prefer": "PreferOAuth",
+  "oauth": { "order": "InOrder", "credentials": [
+    { "name": "max-2", "tokenFile": "C:\\Users\\you\\AppData\\Roaming\\chuggy-windows\\claude\\max-2\\token" },
+    { "name": "max-1", "tokenFile": "C:\\Users\\you\\AppData\\Roaming\\chuggy-windows\\claude\\max-1\\token" }
+  ] },
+  "apiKey": { "order": "InOrder", "credentials": [
+    { "name": "console", "apiKeyFile": "C:\\Users\\you\\AppData\\Roaming\\chuggy-windows\\claude\\console\\key" }
+  ] }
+}
+```
+
+`prefer` is `PreferOAuth` (a subscription or login while one is available, then an API key), `OAuthOnly` or `ApiKeyOnly`. `order` is set for each type: `RoundRobin` has each job take the next credential after the one used last, and `InOrder` always uses the first one available. Each `name` is unique across Claude and Codex, letters, digits, `-` and `_`; runs report the name, never the secret. A file field is `tokenFile` for a Claude subscription, `authFile` for a ChatGPT login and `apiKeyFile` for an API key, each an absolute Windows path a bind mount can name. A credential that hits a usage limit is skipped until the limit resets, one that runs out of credits until the runner restarts; where every allowed credential is out, the runner takes no work for that agent until one is back. A pool's service and each chat host keep their own turns. `doctor` lists each credential's name, agent, type and file and whether it can be read, and reads each file as its type says; restart the runner's task so it reads the new file.
+
+**Codex.** With `codexCredential`, a job requiring `Agent:Codex` is handed that `auth.json`, mounted read-only where every job's credential is, and every other job the Claude credential's file. It is held to the same rule: only you, SYSTEM and the Administrators may open it, and `doctor` also reads it as a JSON object. A pool advertises `Agent:Codex` where an `images` entry declares it or the pool runs host jobs, so list the image Codex jobs run in with that capability:
 
 ```json
 "codexCredential": { "authFile": "C:\\Users\\you\\.codex\\auth.json" },
 "images": [{ "image": "ghcr.io/you/agents@sha256:…", "capabilities": ["Agent:Claude", "Agent:Codex"] }]
 ```
 
-Run `codex login --device-auth` as the task's account, once per machine: a login's refresh token is used once, so two machines never share one `auth.json`. `doctor` warns where the pool advertises `Agent:Codex` and the file names no `codexCredential`, since its Codex jobs would be handed the Claude token file.
+Run `codex login --device-auth` as the task's account, once per machine: a login's refresh token is used once, so two machines never share one `auth.json`. `doctor` warns where the pool advertises `Agent:Codex` and the file names no `codexCredential`, since its Codex jobs would be handed the Claude credential's file.
 
 ## The image a job runs in
 
@@ -194,7 +212,7 @@ The Claude token file's directory is mounted into the container read-only, whole
 chuggy-windows doctor --pool $env:APPDATA\chuggy\pools\vteng.chuggy.shame.json
 ```
 
-Its first line names the copy speaking and the Node it runs under. It checks both files and who may open them, the directories the runner keeps secrets in, the token file, whether jobs are handed Docker Desktop's engine, whether the pool file's task runs this copy, the capabilities a run advertises, the engine and what its VM has, the job network, the free disk against the floor, a token from the pool's issuer and one poll of the plane, which advertises none, and changes nothing. The poll is a long one, so the last check can take a while. Of a chat host it checks what [A chat host](#a-chat-host) says.
+Its first line names the copy speaking and the Node it runs under. It checks both files and who may open them, the directories the runner keeps secrets in, each Claude credential, whether jobs are handed Docker Desktop's engine, whether the pool file's task runs this copy, the capabilities a run advertises, the engine and what its VM has, the job network, the free disk against the floor, a token from the pool's issuer and one poll of the plane, which advertises none, and changes nothing. The poll is a long one, so the last check can take a while. Of a chat host it checks what [A chat host](#a-chat-host) says.
 
 ## Run as a service
 

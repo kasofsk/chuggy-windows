@@ -101,9 +101,10 @@ export async function poolFileWritten(file, pool) {
  *
  * @param {string} home
  * @param {readonly string[]} [beside]
+ * @param {string} [name] the directory's, `claude` where none
  */
-export async function tokenAloneWritten(home, beside = []) {
-  const directory = win32.join(home, "claude");
+export async function tokenAloneWritten(home, beside = [], name = "claude") {
+  const directory = win32.join(home, name);
   const file = win32.join(directory, "token");
   await mkdir(directory, { recursive: true });
   for (const name of [win32.basename(file), ...beside])

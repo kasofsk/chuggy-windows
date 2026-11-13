@@ -672,7 +672,7 @@ async function statusAndStop(machine, poolFile) {
   assert.equal(stop.status, 0, stop.err);
   assert.match(
     stop.out,
-    /^chuggy-shame-a was stopped; logs saved to .*, container removed\nstopped asg-2$/u,
+    /^chuggy-shame-a was stopped; logs saved to .*, container removed\nchuggy-shame-a: the anonymous workspace of chuggy-shame-a is kept, since it was started without chuggy's runtime: its workspace record could not be read\nstopped asg-2$/u,
   );
   assert.ok(!state.containers.has("chuggy-shame-a"));
   return status.out.split("\n").slice(0, 2).join("\n");
@@ -2006,7 +2006,7 @@ test("once and stop are refused of a chat host's file", async (t) => {
 
 /** What status says of a chat host's settings where its file sets none. */
 const chatSettingsLine =
-  "chat: sessionsMax 4, sessionMemoryMib 2048, the supervisor's cap asked of the engine 8192 MiB, idleSecs 600, outputBytesMax 65536, running the image chuggy names";
+  "chat: sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, outputBytesMax 65536, image the one chuggy names";
 
 test("status of a chat host says its settings, and its supervisor where its service holds it, through the pipe its record names", async (t) => {
   const { poolFile, runtime, machine, locks } = await chatMachine(t);

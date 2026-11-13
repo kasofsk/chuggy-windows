@@ -1028,9 +1028,9 @@ test("a pass places a session the plane offers as a session, and its end reaches
     ended: 2,
   });
   assert.deepEqual(pollsAsked, [
-    ["pool-token", [], 1, 2, roomOf(16 * 1024)],
-    ["pool-token", ["asg-1", "ses-1"], 0, 1, roomOf(0)],
-    ["pool-token", [], 1, 2, roomOf(16 * 1024)],
+    ["pool-token", [], 1, 2, { ...roomOf(16 * 1024), withheld: [] }],
+    ["pool-token", ["asg-1", "ses-1"], 0, 1, { ...roomOf(0), withheld: [] }],
+    ["pool-token", [], 1, 2, { ...roomOf(16 * 1024), withheld: [] }],
   ]);
   assert.deepEqual(askedUnder(asked, "ses-1"), [
     [
@@ -1351,9 +1351,10 @@ test("a run advertises the platforms it runs, the agents its file can run, and w
   const claudeImages = [
     { image: "registry.example/claude", capabilities: ["Agent:Claude"] },
   ];
+  const base = ["Platform:Linux:Amd64", "container", "Agent:Claude"];
   for (const [documents, arch, capabilities] of [
-    [{}, "x64", ["Platform:Linux:Amd64", "container"]],
-    [{ pool: withClaude }, "x64", ["Platform:Linux:Amd64", "container"]],
+    [{}, "x64", base],
+    [{ pool: withClaude }, "x64", base],
     [
       { pool: withClaude, runner: { images: claudeImages } },
       "arm64",
@@ -1410,7 +1411,7 @@ test("a run is refused on a machine no pool runs on, and where it would advertis
   assert.throws(
     () => runnerCapabilities(setup, "x64"),
     new Error(
-      `runner configuration ${setup.paths.config}: capabilities: this runner would advertise 65 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
+      `runner configuration ${setup.paths.config}: capabilities: this runner would advertise 66 capabilities, its platforms and agents among them, and a pool advertises at most 64`,
     ),
   );
   const host = {
@@ -1421,7 +1422,7 @@ test("a run is refused on a machine no pool runs on, and where it would advertis
   };
   await assert.rejects(
     runnerParts(setup, host),
-    /^Error: runner configuration .*: capabilities: this runner would advertise 65 /u,
+    /^Error: runner configuration .*: capabilities: this runner would advertise 66 /u,
   );
   await runnerParts(setup, { ...host, places: false, arch: "ia32" });
   const fitting = { ...setup, config: { ...setup.config, capabilities: [] } };

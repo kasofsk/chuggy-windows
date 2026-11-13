@@ -8,10 +8,12 @@
  * `reportMetrics` the run reports on itself and on this machine as
  * `machineFacts.mjs` reads it. Every command starts here.
  *
- * EVERY BACKEND IS TOLD THE KIND OF CLAUDE CREDENTIAL, a subscription's. The
+ * A RUN HOLDS ONE CREDENTIAL SELECTOR, over the sets the runner's file names,
+ * and hands it to every backend, so each job runs on the credential it
+ * chooses and is told that credential's kind and name, never its value. The
  * core withholds what would choose another credential only from a workload
  * told one, so a run that told none would let a variable its jobs inherit
- * outrank the token.
+ * outrank the file.
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -62,6 +64,7 @@ import { machineFacts } from "./machineFacts.mjs";
 import { memoryFreeBytes, memoryReservedBytes } from "./memoryFree.mjs";
 import {
   credentialFileRefusal,
+  runnerCredentialDescribed,
   runnerCredentialsHanded,
   runnerConfig,
   runnerPaths,
@@ -222,9 +225,10 @@ export function runnerEngineSettings(config, paths) {
  *
  * @param {Pick<RunnerSetup, "credentials" | "config" | "paths">} setup
  * @param {string} arch as `process.arch` names this machine
+ * @param {ReturnType<typeof runnerCredentialsHanded>} [handed] the run's credentials, where it holds them already
  * @returns {string[]}
  */
-export function runnerCapabilities(setup, arch) {
+export function runnerCapabilities(setup, arch, handed) {
   const { credentials, config, paths } = setup;
   const found = registerPlatform(arch);
   if ("refused" in found) throw new Error(found.refused);
@@ -232,7 +236,7 @@ export function runnerCapabilities(setup, arch) {
   const hosted = host ? hostPlatform(arch) : undefined;
   const advertised = registerAdvertised({
     platforms: [found.platform, ...(hosted === undefined ? [] : [hosted])],
-    files: runnerCredentialsHanded(config),
+    files: handed ?? runnerCredentialsHanded(config),
     images: config.images,
     host,
     declared: config.capabilities,
@@ -328,10 +332,11 @@ export async function engineMachine(engine) {
  */
 export async function runnerParts(setup, host) {
   const { credentials, config, paths } = setup;
+  const handed = runnerCredentialsHanded(config);
   const capabilities =
     host.places === false
       ? undefined
-      : runnerCapabilities(setup, host.arch ?? process.arch);
+      : runnerCapabilities(setup, host.arch ?? process.arch, handed);
   const runtimeDir = poolRuntimeDirectory(paths, credentials);
   const engine = host.engine ?? runnerEngine(config);
   const dockerHost = await engineEndpoint(engine);
@@ -348,7 +353,7 @@ export async function runnerParts(setup, host) {
     {
       engine: config.engine,
       pool: credentials,
-      ...runnerCredentialsHanded(config),
+      ...handed,
       registryHost: credentials.registryHost,
       dockerHost,
       timeoutSecsMax: config.timeoutSecsMax,
@@ -373,15 +378,15 @@ export async function runnerParts(setup, host) {
       nowMs: Date.now,
       sleep: (ms, signal) => delay(ms, undefined, { signal }),
       log: host.log,
-      tokenFileRefusal: (file, agent) =>
-        credentialFileRefusal(file, host.sharedRefusal, agent),
+      tokenFileRefusal: (file, _agent, credential) =>
+        runnerCredentialRefusal(credential, file, host.sharedRefusal),
       diskFree,
     },
   );
   const backend =
     host.places === false
       ? container
-      : runnerHostRouted(setup, container, host);
+      : runnerHostRouted(setup, container, host, handed);
   const client = runnerClient(setup, backend, host, {
     tokens,
     capabilities,
@@ -528,9 +533,10 @@ export function hostJobTreeKilled(pid) {
  * @param {RunnerSetup} setup
  * @param {ContainerBackend} container
  * @param {{log: (line: string) => void, sharedRefusal: SharedRefusal, spawn?: typeof spawn}} host
+ * @param {ReturnType<typeof runnerCredentialsHanded>} handed the run's credentials, which the container backend holds too
  * @returns {ContainerBackend}
  */
-function runnerHostRouted(setup, container, host) {
+function runnerHostRouted(setup, container, host, handed) {
   const { credentials, config, paths } = setup;
   const platforms = hostPlatformsDeclared(credentials, "Windows");
   if (platforms.length === 0) return container;
@@ -541,7 +547,7 @@ function runnerHostRouted(setup, container, host) {
         platforms,
         directory: win32.join(paths.jobs, poolIdentityDigest(credentials)),
         logDir: paths.logs,
-        ...runnerCredentialsHanded(config),
+        ...handed,
         timeoutSecsMax: config.timeoutSecsMax,
         outputBytesMax: config.outputBytesMax,
         environment: config.environment,
@@ -553,14 +559,32 @@ function runnerHostRouted(setup, container, host) {
       },
       {
         log: host.log,
-        tokenFileRefusal: (file, agent) =>
-          credentialFileRefusal(file, host.sharedRefusal, agent),
+        tokenFileRefusal: (file, _agent, credential) =>
+          runnerCredentialRefusal(credential, file, host.sharedRefusal),
         spawn: host.spawn ?? hostJobSpawned,
         kill: (pid) => hostJobTreeKilled(pid),
         atExit: (onExit) => process.once("exit", onExit),
       },
     ),
     platforms,
+  );
+}
+
+/**
+ * Why a job cannot be handed the file of the credential the selector chose,
+ * named as that credential's kind or type is, or nothing.
+ *
+ * @param {import("@chuggy/worker-core/agentCredentialSet.mjs").AgentCredential | undefined} credential
+ * @param {string} file
+ * @param {SharedRefusal} sharedRefusal
+ */
+function runnerCredentialRefusal(credential, file, sharedRefusal) {
+  if (credential === undefined)
+    throw new Error(`the selector chose no credential for ${file}`);
+  return credentialFileRefusal(
+    runnerCredentialDescribed(credential),
+    file,
+    sharedRefusal,
   );
 }
 
